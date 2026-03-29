@@ -396,7 +396,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
                 timestamp: Date.now()
               });
             }
-          } catch(e) {}
+          } catch (e) { }
         }
       }
       break;
@@ -415,7 +415,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
         });
       }
       break;
-      
+
     // Similarly for webSocketFrameSent if we wanted to only monitor and not proxy
     // But we are proxying sends via Runtime.evaluate, so we might see duplicates if Network domain reports it too.
     // For now we'll rely on the proxy for sends to actually block them.
