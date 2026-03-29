@@ -292,74 +292,250 @@
         <!-- /intrude-panel -->
 
         <!-- ── WEBSOCKET INTRUDER PANEL ── -->
-        <div class="tab-panel" id="websocket-panel" data-panel="websocket" style="display: flex; flex-direction: column; height: 100%;">
+        <div
+          class="tab-panel"
+          id="websocket-panel"
+          data-panel="websocket"
+          style="display: flex; flex-direction: column; height: 100%"
+        >
           <!-- WS Toolbar -->
-          <div id="ws-toolbar" style="padding: 8px 12px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; background: var(--bg-1);">
+          <div
+            id="ws-toolbar"
+            style="
+              padding: 8px 12px;
+              border-bottom: 1px solid var(--border);
+              display: flex;
+              align-items: center;
+              gap: 10px;
+              background: var(--bg-1);
+            "
+          >
             <button class="attach-btn" id="ws-attach-btn">⚡ Attach WS</button>
-            <span id="ws-status-label" style="font-size: 11px; color: var(--text-2);">Not attached.</span>
-            <button class="tool-btn danger" id="ws-clear-btn" title="Clear messages">✕ Clear</button>
+            <span
+              id="ws-status-label"
+              style="font-size: 11px; color: var(--text-2)"
+              >Not attached.</span
+            >
+            <button
+              class="tool-btn danger"
+              id="ws-clear-btn"
+              title="Clear messages"
+            >
+              ✕ Clear
+            </button>
           </div>
 
           <!-- WS Main Area -->
-          <div id="ws-main" style="display: flex; flex: 1; overflow: hidden; height: calc(100vh - 70px);">
-            
+          <div
+            id="ws-main"
+            style="
+              display: flex;
+              flex: 1;
+              overflow: hidden;
+              height: calc(100vh - 70px);
+            "
+          >
             <!-- Queue/Messages List -->
-            <div id="ws-message-list-pane" style="width: 350px; border-right: 1px solid var(--border); display: flex; flex-direction: column; background: var(--bg-0);">
-              <div class="list-header net-grid" style="display: flex; padding: 4px 8px; font-size: 10px; font-weight: 700; color: var(--text-2); border-bottom: 1px solid var(--border); background: var(--bg-1);">
-                <span style="flex: 1;">Dir</span>
-                <span style="flex: 3; text-overflow: ellipsis; white-space: nowrap; overflow: hidden;">Data</span>
-                <span style="flex: 1; text-align: right;">Time</span>
+            <div
+              id="ws-message-list-pane"
+              style="
+                width: 350px;
+                border-right: 1px solid var(--border);
+                display: flex;
+                flex-direction: column;
+                background: var(--bg-0);
+              "
+            >
+              <div
+                class="list-header net-grid"
+                style="
+                  display: flex;
+                  padding: 4px 8px;
+                  font-size: 10px;
+                  font-weight: 700;
+                  color: var(--text-2);
+                  border-bottom: 1px solid var(--border);
+                  background: var(--bg-1);
+                "
+              >
+                <span style="flex: 1">Dir</span>
+                <span
+                  style="
+                    flex: 3;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                    overflow: hidden;
+                  "
+                  >Data</span
+                >
+                <span style="flex: 1; text-align: right">Time</span>
               </div>
-              <div id="ws-message-list-body" style="flex: 1; overflow-y: auto;">
+              <div id="ws-message-list-body" style="flex: 1; overflow-y: auto">
                 <div class="empty-state" id="ws-empty">
-                  <span class="icon" style="font-size: 24px; margin-bottom: 8px;">🔌</span>
+                  <span class="icon" style="font-size: 24px; margin-bottom: 8px"
+                    >🔌</span
+                  >
                   <p>Waiting for WebSocket messages…</p>
                 </div>
               </div>
             </div>
 
             <!-- Resize Handle -->
-            <div class="resize-handle" id="ws-resize" style="width: 4px; cursor: col-resize; background: var(--border);"></div>
+            <div
+              class="resize-handle"
+              id="ws-resize"
+              style="width: 4px; cursor: col-resize; background: var(--border)"
+            ></div>
 
             <!-- WS Message Editor / Creator -->
-            <div id="ws-editor-pane" style="flex: 1; display: flex; flex-direction: column; background: var(--bg-0);">
+            <div
+              id="ws-editor-pane"
+              style="
+                flex: 1;
+                display: flex;
+                flex-direction: column;
+                background: var(--bg-0);
+              "
+            >
               <div class="detail-tabs">
-                <button class="detail-tab active" data-wstab="view">View/Edit Selected</button>
-                <button class="detail-tab" data-wstab="create">Create New Message</button>
+                <button class="detail-tab active" data-wstab="view">
+                  View/Edit Selected
+                </button>
+                <button class="detail-tab" data-wstab="create">
+                  Create New Message
+                </button>
               </div>
-              
-              <div class="detail-body" id="ws-editor-content" style="padding: 10px; display: flex; flex-direction: column; flex: 1;">
-                
+
+              <div
+                class="detail-body"
+                id="ws-editor-content"
+                style="
+                  padding: 10px;
+                  display: flex;
+                  flex-direction: column;
+                  flex: 1;
+                "
+              >
                 <!-- View/Edit active message -->
-                <div id="ws-view-tab" style="display: flex; flex-direction: column; height: 100%;">
-                  <div id="ws-no-message" class="editor-no-request" style="padding: 20px; text-align: center; color: var(--text-2);">
-                      <div class="icon" style="font-size: 24px; margin-bottom: 10px;">💬</div>
-                      <span>Select a message to view or edit.</span>
+                <div
+                  id="ws-view-tab"
+                  style="display: flex; flex-direction: column; height: 100%"
+                >
+                  <div
+                    id="ws-no-message"
+                    class="editor-no-request"
+                    style="
+                      padding: 20px;
+                      text-align: center;
+                      color: var(--text-2);
+                    "
+                  >
+                    <div
+                      class="icon"
+                      style="font-size: 24px; margin-bottom: 10px"
+                    >
+                      💬
+                    </div>
+                    <span>Select a message to view or edit.</span>
                   </div>
-                  
-                  <div id="ws-message-details" style="display: none; flex-direction: column; height: 100%;">
-                    <div style="margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between;">
+
+                  <div
+                    id="ws-message-details"
+                    style="display: none; flex-direction: column; height: 100%"
+                  >
+                    <div
+                      style="
+                        margin-bottom: 10px;
+                        display: flex;
+                        align-items: center;
+                        justify-content: space-between;
+                      "
+                    >
                       <div>
-                        <span id="ws-detail-dir" style="padding: 2px 6px; border-radius: 3px; font-size: 10px; font-weight: bold; background: var(--bg-2);">↑</span>
-                        <span id="ws-detail-time" style="font-size: 11px; color: var(--text-2); margin-left: 8px;"></span>
+                        <span
+                          id="ws-detail-dir"
+                          style="
+                            padding: 2px 6px;
+                            border-radius: 3px;
+                            font-size: 10px;
+                            font-weight: bold;
+                            background: var(--bg-2);
+                          "
+                          >↑</span
+                        >
+                        <span
+                          id="ws-detail-time"
+                          style="
+                            font-size: 11px;
+                            color: var(--text-2);
+                            margin-left: 8px;
+                          "
+                        ></span>
                       </div>
-                      <div style="display: flex; gap: 8px;">
-                        <button class="fwd-btn" id="ws-btn-send-edited">▶ Forward Edited</button>
-                        <button class="drop-btn" id="ws-btn-drop">✕ Drop</button>
+                      <div style="display: flex; gap: 8px">
+                        <button class="fwd-btn" id="ws-btn-send-edited">
+                          ▶ Forward Edited
+                        </button>
+                        <button class="drop-btn" id="ws-btn-drop">
+                          ✕ Drop
+                        </button>
                       </div>
                     </div>
-                    
-                    <textarea id="ws-detail-payload" class="editor-field" style="flex: 1; width: 100%; resize: none; background: var(--bg-input); border: 1px solid var(--border); color: var(--text-0); font-family: var(--font-mono); padding: 8px; box-sizing: border-box;" spellcheck="false"></textarea>
+
+                    <textarea
+                      id="ws-detail-payload"
+                      class="editor-field"
+                      style="
+                        flex: 1;
+                        width: 100%;
+                        resize: none;
+                        background: var(--bg-input);
+                        border: 1px solid var(--border);
+                        color: var(--text-0);
+                        font-family: var(--font-mono);
+                        padding: 8px;
+                        box-sizing: border-box;
+                      "
+                      spellcheck="false"
+                    ></textarea>
                   </div>
                 </div>
 
                 <!-- Create new message -->
-                <div id="ws-create-tab" style="display: none; flex-direction: column; height: 100%;">
-                  <div style="margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between;">
-                    <span style="font-size: 12px; font-weight: bold;">Send Custom Message</span>
+                <div
+                  id="ws-create-tab"
+                  style="display: none; flex-direction: column; height: 100%"
+                >
+                  <div
+                    style="
+                      margin-bottom: 10px;
+                      display: flex;
+                      align-items: center;
+                      justify-content: space-between;
+                    "
+                  >
+                    <span style="font-size: 12px; font-weight: bold"
+                      >Send Custom Message</span
+                    >
                     <button class="fwd-btn" id="ws-btn-send-new">▶ Send</button>
                   </div>
-                  <textarea id="ws-new-payload" class="editor-field" style="flex: 1; width: 100%; resize: none; background: var(--bg-input); border: 1px solid var(--border); color: var(--text-0); font-family: var(--font-mono); padding: 8px; box-sizing: border-box;" spellcheck="false" placeholder="Enter message payload..."></textarea>
+                  <textarea
+                    id="ws-new-payload"
+                    class="editor-field"
+                    style="
+                      flex: 1;
+                      width: 100%;
+                      resize: none;
+                      background: var(--bg-input);
+                      border: 1px solid var(--border);
+                      color: var(--text-0);
+                      font-family: var(--font-mono);
+                      padding: 8px;
+                      box-sizing: border-box;
+                    "
+                    spellcheck="false"
+                    placeholder="Enter message payload..."
+                  ></textarea>
                 </div>
               </div>
             </div>
