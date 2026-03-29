@@ -19,6 +19,10 @@ const attachedTabs = new Map();
 // Maps requestId → {tabId, ...CDPParams}
 const pendingRequests = new Map();
 
+// Maps tabId -> bool (whether WS Intruder is attached )
+const wsAttachedTabs = new Map();
+const pendingWsMessages = new Map(); // messageId -> resolve Function or pending data
+
 // ─── Panel Connection ──────────────────────────────────────────────────────────
 chrome.runtime.onConnect.addListener((port) => {
   // Port name convention: "panel_{tabId}"
@@ -65,6 +69,26 @@ async function handlePanelMessage(tabId, msg) {
 
     case 'js:disable':
       await jsDisable(tabId);
+      break;
+
+    case 'ws:attach':
+      await wsAttach(tabId);
+      break;
+
+    case 'ws:detach':
+      await wsDetach(tabId);
+      break;
+
+    case 'ws:forward':
+      await wsForward(tabId, msg.messageId, msg.payload, msg.direction);
+      break;
+
+    case 'ws:drop':
+      await wsDrop(tabId, msg.messageId);
+      break;
+
+    case 'ws:create':
+      await wsCreateAndSend(tabId, msg.payload);
       break;
 
     default:
