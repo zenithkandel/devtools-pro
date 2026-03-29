@@ -596,7 +596,7 @@ function renderWsQueue() {
     body.appendChild(createEmpty('🔌', 'Waiting for WebSocket messages…'));
     return;
   }
-  
+
   body.innerHTML = '';
   state.wsMessages.forEach(msg => {
     const el = document.createElement('div');
@@ -606,30 +606,30 @@ function renderWsQueue() {
     el.style.padding = '4px 8px';
     el.style.cursor = 'pointer';
     el.style.borderBottom = '1px solid var(--border)';
-    
+
     // Direction indicator
     const dir = msg.direction === 'sent' ? '↑' : '↓';
     const color = msg.direction === 'sent' ? '#5bdba6' : '#ff9a9a';
-    
+
     // Excerpt
     const text = msg.payload || '';
     const excerpt = text.substring(0, 50) + (text.length > 50 ? '...' : '');
-    
+
     // Time
     const time = new Date(msg.timestamp || Date.now()).toLocaleTimeString();
-    
+
     el.innerHTML = `
       <span style="flex:1;color:${color}">${dir}</span>
       <span style="flex:3;text-overflow:ellipsis;white-space:nowrap;overflow:hidden;font-family:var(--font-mono);">${escapeHtml(excerpt)}</span>
       <span style="flex:1;text-align:right;color:var(--text-2);">${time}</span>
     `;
-    
+
     el.addEventListener('click', () => {
       state.wsSelectedMessageId = msgId;
       renderWsQueue();
       renderWsEditor();
     });
-    
+
     body.appendChild(el);
   });
 }
@@ -638,16 +638,16 @@ function renderWsEditor() {
   const msg = state.wsMessages.find(m => (m.messageId || m.id) === state.wsSelectedMessageId);
   const noMsgPane = $('ws-no-message');
   const detailsPane = $('ws-message-details');
-  
+
   if (!msg) {
     noMsgPane.style.display = 'flex';
     detailsPane.style.display = 'none';
     return;
   }
-  
+
   noMsgPane.style.display = 'none';
   detailsPane.style.display = 'flex';
-  
+
   const dirSpan = $('ws-detail-dir');
   if (msg.direction === 'sent') {
     dirSpan.textContent = '↑ SENT';
@@ -656,7 +656,7 @@ function renderWsEditor() {
     dirSpan.textContent = '↓ RECV';
     dirSpan.style.color = '#ff9a9a';
   }
-  
+
   $('ws-detail-time').textContent = new Date(msg.timestamp || Date.now()).toLocaleTimeString();
   $('ws-detail-payload').value = msg.payload || '';
 }
@@ -970,6 +970,17 @@ function tryPrettyJson(str) {
   } catch {
     return str;
   }
+}
+
+function escapeHtml(unsafe) {
+  if (!unsafe) return '';
+  return unsafe
+    .toString()
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
 }
 
 function createEmpty(icon, text) {
