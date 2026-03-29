@@ -110,6 +110,35 @@ function onBackgroundMessage(msg) {
       toast('JavaScript disabled.', 'warning');
       break;
 
+    // ── WS Intruder events ──────────────────────────────
+    case 'ws:attached':
+      state.wsAttached = true;
+      updateWsUI();
+      toast('WebSocket Intruder attached.', 'success');
+      break;
+
+    case 'ws:detached':
+      state.wsAttached = false;
+      state.wsMessages = [];
+      state.wsSelectedMessageId = null;
+      updateWsUI();
+      renderWsQueue();
+      renderWsEditor();
+      toast(msg.reason ? `WS Detached: ${msg.reason}` : 'WS Detached.', 'info');
+      break;
+
+    case 'ws:messagePaused':
+      addToWsQueue(msg);
+      break;
+
+    case 'ws:forwarded':
+      removeFromWsQueue(msg.messageId, 'Forwarded');
+      break;
+
+    case 'ws:dropped':
+      removeFromWsQueue(msg.messageId, 'Dropped');
+      break;
+
     case 'error':
       toast(msg.message, 'error');
       break;
@@ -518,6 +547,121 @@ function updateJsToggle() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// ─── WS INTRUDE CONTROLS ──────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function updateWsUI() {
+  const attachB = $('ws-attach-btn');
+  const label = $('ws-status-label');
+  if (state.wsAttached) {
+    attachB.textContent = '✕ Detach WS';
+    attachB.style.background = 'var(--bg-3)';
+    label.textContent = 'Attached. Intercepting WebSockets...';
+    label.style.color = 'var(--text-0)';
+  } else {
+    attachB.textContent = '⚡ Attach WS';
+    attachB.style.background = 'var(--accent)';
+    label.textContent = 'Not attached.';
+    label.style.color = 'var(--text-2)';
+  }
+}
+
+function addToWsQueue(msg) {
+  state.wsMessages.push(msg);
+  if (!state.wsSelectedMessageId) {
+    state.wsSelectedMessageId = msg.messageId;
+  }
+  renderWsQueue();
+  renderWsEditor();
+}
+
+function removeFromWsQueue(messageId, status) {
+  const idx = state.wsMessages.findIndex(m => m.id === messageId || m.messageId === messageId);
+  if (idx !== -1) {
+    state.wsMessages[idx].status = status;
+    // Just mark it, or remove it entirely depending on preference. Let's remove if forwarded/dropped.
+    state.wsMessages.splice(idx, 1);
+  }
+  if (state.wsSelectedMessageId === messageId) {
+    state.wsSelectedMessageId = state.wsMessages.length > 0 ? state.wsMessages[0].messageId || state.wsMessages[0].id : null;
+  }
+  renderWsQueue();
+  renderWsEditor();
+}
+
+function renderWsQueue() {
+  const body = $('ws-message-list-body');
+  if (state.wsMessages.length === 0) {
+    body.innerHTML = '';
+    body.appendChild(createEmpty('🔌', 'Waiting for WebSocket messages…'));
+    return;
+  }
+  
+  body.innerHTML = '';
+  state.wsMessages.forEach(msg => {
+    const el = document.createElement('div');
+    const msgId = msg.messageId || msg.id;
+    el.className = `list-row ${state.wsSelectedMessageId === msgId ? 'selected' : ''}`;
+    el.style.display = 'flex';
+    el.style.padding = '4px 8px';
+    el.style.cursor = 'pointer';
+    el.style.borderBottom = '1px solid var(--border)';
+    
+    // Direction indicator
+    const dir = msg.direction === 'sent' ? '↑' : '↓';
+    const color = msg.direction === 'sent' ? '#5bdba6' : '#ff9a9a';
+    
+    // Excerpt
+    const text = msg.payload || '';
+    const excerpt = text.substring(0, 50) + (text.length > 50 ? '...' : '');
+    
+    // Time
+    const time = new Date(msg.timestamp || Date.now()).toLocaleTimeString();
+    
+    el.innerHTML = `
+      <span style="flex:1;color:${color}">${dir}</span>
+      <span style="flex:3;text-overflow:ellipsis;white-space:nowrap;overflow:hidden;font-family:var(--font-mono);">${escapeHtml(excerpt)}</span>
+      <span style="flex:1;text-align:right;color:var(--text-2);">${time}</span>
+    `;
+    
+    el.addEventListener('click', () => {
+      state.wsSelectedMessageId = msgId;
+      renderWsQueue();
+      renderWsEditor();
+    });
+    
+    body.appendChild(el);
+  });
+}
+
+function renderWsEditor() {
+  const msg = state.wsMessages.find(m => (m.messageId || m.id) === state.wsSelectedMessageId);
+  const noMsgPane = $('ws-no-message');
+  const detailsPane = $('ws-message-details');
+  
+  if (!msg) {
+    noMsgPane.style.display = 'flex';
+    detailsPane.style.display = 'none';
+    return;
+  }
+  
+  noMsgPane.style.display = 'none';
+  detailsPane.style.display = 'flex';
+  
+  const dirSpan = $('ws-detail-dir');
+  if (msg.direction === 'sent') {
+    dirSpan.textContent = '↑ SENT';
+    dirSpan.style.color = '#5bdba6';
+  } else {
+    dirSpan.textContent = '↓ RECV';
+    dirSpan.style.color = '#ff9a9a';
+  }
+  
+  $('ws-detail-time').textContent = new Date(msg.timestamp || Date.now()).toLocaleTimeString();
+  $('ws-detail-payload').value = msg.payload || '';
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // ─── STATUS BAR ───────────────────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -634,9 +778,9 @@ function wireEvents() {
     const msg = state.wsMessages.find(m => m.id === state.wsSelectedMessageId);
     if (!msg) return;
     const newPayload = $('ws-detail-payload').value;
-    sendBg({ 
-      type: 'ws:forward', 
-      messageId: msg.id, 
+    sendBg({
+      type: 'ws:forward',
+      messageId: msg.id,
       payload: newPayload,
       direction: msg.direction
     });
