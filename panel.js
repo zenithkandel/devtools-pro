@@ -15,7 +15,7 @@ const tabId = chrome.devtools.inspectedWindow.tabId;
 
 const state = {
   // UI
-  activeTab: 'network',   // 'network' | 'intrude'
+  activeTab: 'network',   // 'network' | 'intrude' | 'websocket'
   activeDetailTab: 'headers',
 
   // Network tab
@@ -131,12 +131,26 @@ function onBackgroundMessage(msg) {
       addToWsQueue(msg);
       break;
 
+    case 'ws:socketDetected':
+      addToWsQueue({
+        messageId: `ws_info_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        direction: 'info',
+        payload: `[OPEN] ${msg.url || 'unknown websocket url'}`,
+        timestamp: msg.timestamp || Date.now(),
+      });
+      toast(`WebSocket detected: ${shortenUrl(msg.url || 'unknown', 60)}`, 'info');
+      break;
+
     case 'ws:forwarded':
       removeFromWsQueue(msg.messageId, 'Forwarded');
       break;
 
     case 'ws:dropped':
       removeFromWsQueue(msg.messageId, 'Dropped');
+      break;
+
+    case 'ws:created':
+      toast('Custom WebSocket message sent.', 'success');
       break;
 
     case 'error':
@@ -608,8 +622,8 @@ function renderWsQueue() {
     el.style.borderBottom = '1px solid var(--border)';
 
     // Direction indicator
-    const dir = msg.direction === 'sent' ? '↑' : '↓';
-    const color = msg.direction === 'sent' ? '#5bdba6' : '#ff9a9a';
+    const dir = msg.direction === 'sent' ? '↑' : (msg.direction === 'recv' ? '↓' : '•');
+    const color = msg.direction === 'sent' ? '#5bdba6' : (msg.direction === 'recv' ? '#ff9a9a' : 'var(--text-1)');
 
     // Excerpt
     const text = msg.payload || '';
@@ -652,9 +666,12 @@ function renderWsEditor() {
   if (msg.direction === 'sent') {
     dirSpan.textContent = '↑ SENT';
     dirSpan.style.color = '#5bdba6';
-  } else {
+  } else if (msg.direction === 'recv') {
     dirSpan.textContent = '↓ RECV';
     dirSpan.style.color = '#ff9a9a';
+  } else {
+    dirSpan.textContent = '• INFO';
+    dirSpan.style.color = 'var(--text-1)';
   }
 
   $('ws-detail-time').textContent = new Date(msg.timestamp || Date.now()).toLocaleTimeString();
@@ -775,17 +792,16 @@ function wireEvents() {
 
   $('ws-btn-send-edited').addEventListener('click', () => {
     if (!state.wsSelectedMessageId) return;
-    const msg = state.wsMessages.find(m => m.id === state.wsSelectedMessageId);
+    const msg = state.wsMessages.find(m => (m.messageId || m.id) === state.wsSelectedMessageId);
     if (!msg) return;
     const newPayload = $('ws-detail-payload').value;
+    const targetMessageId = msg.messageId || msg.id;
     sendBg({
       type: 'ws:forward',
-      messageId: msg.id,
+      messageId: targetMessageId,
       payload: newPayload,
       direction: msg.direction
     });
-    // Remove from UI if paused
-    removeFromWsQueue(msg.id, 'Forwarded');
   });
 
   $('ws-btn-drop').addEventListener('click', () => {
@@ -798,7 +814,6 @@ function wireEvents() {
     const payload = $('ws-new-payload').value;
     if (!payload.trim()) return;
     sendBg({ type: 'ws:create', payload });
-    toast('Custom WS message sent.', 'success');
   });
 
   $('btn-clear').addEventListener('click', () => {
@@ -821,10 +836,10 @@ function wireEvents() {
   });
 
   // ── Detail tab switching ───────────────────────────────────
-  document.querySelectorAll('.detail-tab').forEach(btn => {
+  document.querySelectorAll('.detail-tab[data-dtab]').forEach(btn => {
     btn.addEventListener('click', () => {
       state.activeDetailTab = btn.dataset.dtab;
-      document.querySelectorAll('.detail-tab').forEach(b => b.classList.toggle('active', b === btn));
+      document.querySelectorAll('.detail-tab[data-dtab]').forEach(b => b.classList.toggle('active', b === btn));
       renderDetailTab(state.activeDetailTab);
     });
   });
@@ -1000,6 +1015,8 @@ function createEmpty(icon, text) {
   wireEvents();
   initResizeHandle();
   updateIntrudeUI();
+  updateWsUI();
+  renderWsQueue();
   updateQueueCount();
   updateStatusBar();
 })();
