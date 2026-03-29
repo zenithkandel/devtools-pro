@@ -3,41 +3,58 @@
 
 /**
  * Inject the external page context script
+ * This runs in the page context to intercept fetch/XHR
  */
 function injectPageContextScript() {
   try {
     const script = document.createElement('script');
     script.src = chrome.runtime.getURL('src/injected.js');
-    script.onload = () => script.remove();
-    script.onerror = () => {
-      console.error('[DevTools Pro] Failed to load injected.js');
+    script.type = 'text/javascript';
+    script.onload = () => {
+      console.log('[DevTools Pro] injected.js loaded successfully');
+      script.remove();
+    };
+    script.onerror = (error) => {
+      console.error('[DevTools Pro] Failed to load injected.js:', error);
       script.remove();
     };
 
-    // Inject at document_start if possible
+    // Try to insert immediately
     if (document.documentElement) {
       document.documentElement.insertBefore(script, document.documentElement.firstChild);
     } else {
-      document.addEventListener('DOMContentLoaded', () => {
-        const s = document.createElement('script');
-        s.src = chrome.runtime.getURL('src/injected.js');
-        s.onload = () => s.remove();
-        s.onerror = () => s.remove();
-        document.head.insertBefore(s, document.head.firstChild);
-      });
+      // If document element doesn't exist, wait for it
+      function tryInject() {
+        if (document.documentElement) {
+          const s = document.createElement('script');
+          s.src = chrome.runtime.getURL('src/injected.js');
+          s.type = 'text/javascript';
+          s.onload = () => s.remove();
+          s.onerror = () => s.remove();
+          document.documentElement.insertBefore(s, document.documentElement.firstChild);
+        } else {
+          setTimeout(tryInject, 10);
+        }
+      }
+      tryInject();
     }
   } catch (e) {
-    console.error('[DevTools Pro] Error injecting script:', e);
+    console.error('[DevTools Pro] Error in injectPageContextScript:', e);
   }
 }
 
-// Inject page context script immediately
+// Inject script at the earliest opportunity
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', injectPageContextScript);
+  // DOM is still loading
+  injectPageContextScript();
+  // Also try again on DOMContentLoaded as fallback
+  document.addEventListener('DOMContentLoaded', injectPageContextScript, true);
 } else {
+  // DOM is already loaded
   injectPageContextScript();
 }
 
+// Rest of content script code
 let tabId = null;
 let currentInterceptMode = 'off';
 const pendingInterceptions = new Map(); // requestId -> { request, timeout }

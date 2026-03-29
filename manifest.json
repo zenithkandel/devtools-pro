@@ -6,8 +6,7 @@
   "permissions": [
     "webRequest",
     "tabs",
-    "scripting",
-    "devtools"
+    "scripting"
   ],
   "host_permissions": [
     "<all_urls>"
