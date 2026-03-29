@@ -4,6 +4,60 @@
 const requestStorage = new Map(); // tabId -> { requests: [], interceptMode, pausedJs }
 const devtoolsConnections = new Map(); // tabId -> port
 
+function normalizeHeaders(headers) {
+  if (!headers) return [];
+
+  if (Array.isArray(headers)) {
+    return headers
+      .filter((header) => header && header.name)
+      .map((header) => ({
+        name: String(header.name),
+        value: header.value == null ? '' : String(header.value)
+      }));
+  }
+
+  if (typeof headers === 'object') {
+    return Object.entries(headers).map(([name, value]) => ({
+      name,
+      value: value == null ? '' : String(value)
+    }));
+  }
+
+  return [];
+}
+
+function serializeBody(body) {
+  if (body == null) return '';
+  if (typeof body === 'string') return body;
+
+  try {
+    return JSON.stringify(body);
+  } catch {
+    return String(body);
+  }
+}
+
+function buildInterceptedRequest(tabId, data) {
+  return {
+    id: data.requestId,
+    url: data.url || '',
+    method: data.method || 'GET',
+    tabId,
+    type: data.type || 'intercepted',
+    timestamp: Date.now(),
+    startTime: performance.now(),
+    requestHeaders: normalizeHeaders(data.headers),
+    responseHeaders: [],
+    statusCode: 0,
+    statusText: '',
+    requestBody: serializeBody(data.body),
+    responseBody: '',
+    size: 0,
+    duration: 0,
+    intercepted: true
+  };
+}
+
 /**
  * Initialize tab data structure
  */
@@ -133,12 +187,35 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     case 'INTERCEPT_REQUEST':
       {
+        if (!actualTabId || !data?.requestId) {
+          sendResponse({ intercepted: false, error: 'Invalid interception payload' });
+          break;
+        }
+
         const tabData = initTabData(actualTabId);
-        tabData.interceptQueue.push({
-          requestId: data.requestId,
-          status: 'pending',
-          modifications: {}
-        });
+        let queueItem = tabData.interceptQueue.find(
+          (item) => item.requestId === data.requestId
+        );
+
+        if (!queueItem) {
+          const interceptedRequest = buildInterceptedRequest(actualTabId, data);
+
+          queueItem = {
+            requestId: data.requestId,
+            request: interceptedRequest,
+            status: 'pending',
+            modifications: {}
+          };
+
+          tabData.interceptQueue.push(queueItem);
+          tabData.requestMap.set(data.requestId, interceptedRequest);
+          tabData.requests.push(interceptedRequest);
+
+          if (tabData.requests.length > 500) {
+            const oldest = tabData.requests.shift();
+            tabData.requestMap.delete(oldest.id);
+          }
+        }
 
         // Send message to devtools
         if (devtoolsConnections.has(actualTabId)) {
@@ -146,7 +223,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             type: 'REQUEST_INTERCEPTED',
             data: {
               requestId: data.requestId,
-              request: tabData.requestMap.get(data.requestId)
+              request: queueItem.request
             }
           });
         }
@@ -160,9 +237,22 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         const tabData = initTabData(actualTabId);
         // Store modifications if any
         if (data.modifications) {
-          const request = tabData.requestMap.get(data.requestId);
-          if (request) {
-            Object.assign(request, data.modifications);
+          const queueItem = tabData.interceptQueue.find(
+            (item) => item.requestId === data.requestId
+          );
+          if (queueItem) {
+            queueItem.modifications = data.modifications;
+          }
+
+          const requestEntry = tabData.requestMap.get(data.requestId);
+          if (requestEntry) {
+            if (Array.isArray(data.modifications.requestHeaders)) {
+              requestEntry.requestHeaders = data.modifications.requestHeaders;
+            }
+
+            if (Object.prototype.hasOwnProperty.call(data.modifications, 'requestBody')) {
+              requestEntry.requestBody = serializeBody(data.modifications.requestBody);
+            }
           }
         }
 
@@ -255,7 +345,12 @@ chrome.runtime.onConnect.addListener((port) => {
     data: {
       requests: tabData.requests,
       interceptMode: tabData.interceptMode,
-      interceptQueue: tabData.interceptQueue
+      interceptQueue: tabData.interceptQueue.map((item) => ({
+        requestId: item.requestId,
+        request: item.request || tabData.requestMap.get(item.requestId) || null,
+        status: item.status || 'pending',
+        modifications: item.modifications || {}
+      }))
     }
   });
 

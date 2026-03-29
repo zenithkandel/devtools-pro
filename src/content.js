@@ -8,6 +8,29 @@ const CSP_SAFE_BUILD_MARKER = 'csp-main-world-2026-03-29';
 let tabId = null;
 let currentInterceptMode = 'off';
 const pendingInterceptions = new Map(); // requestId -> { request, timeout }
+const queuedInterceptions = []; // payloads captured before tabId resolves
+
+function sendInterceptToBackground(payload) {
+  if (!tabId) {
+    queuedInterceptions.push(payload);
+    return;
+  }
+
+  chrome.runtime.sendMessage({
+    type: 'INTERCEPT_REQUEST',
+    tabId,
+    data: payload
+  });
+}
+
+function flushQueuedInterceptions() {
+  if (!tabId || queuedInterceptions.length === 0) return;
+
+  while (queuedInterceptions.length > 0) {
+    const payload = queuedInterceptions.shift();
+    sendInterceptToBackground(payload);
+  }
+}
 
 /**
  * Get the current tab ID immediately
@@ -17,6 +40,7 @@ function initTabId() {
     if (response) {
       tabId = response.tabId;
       console.log('[DevTools Pro] Content script initialized for tab:', tabId);
+      flushQueuedInterceptions();
     }
   });
 }
@@ -46,20 +70,14 @@ window.addEventListener('message', (event) => {
 
     case 'INTERCEPT_FETCH':
     case 'INTERCEPT_XHR':
-      if (!tabId) return;
-
       if (currentInterceptMode !== 'off') {
-        // Send to devtools via background
-        chrome.runtime.sendMessage({
-          type: 'INTERCEPT_REQUEST',
-          tabId,
-          data: {
-            requestId,
-            method,
-            url,
-            headers,
-            body
-          }
+        sendInterceptToBackground({
+          requestId,
+          method,
+          url,
+          headers,
+          body,
+          type: type === 'INTERCEPT_FETCH' ? 'fetch' : 'xhr'
         });
 
         // Set timeout for user response
