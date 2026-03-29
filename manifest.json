@@ -3,15 +3,8 @@
   "name": "DevTools Pro",
   "version": "1.0.0",
   "description": "Professional network request monitoring and interception tool for Chrome DevTools",
-  "permissions": [
-    "webRequest",
-    "tabs",
-    "scripting",
-    "devtools"
-  ],
-  "host_permissions": [
-    "<all_urls>"
-  ],
+  "permissions": ["webRequest", "tabs", "scripting", "devtools"],
+  "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "src/background.js"
   },
