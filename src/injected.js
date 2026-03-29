@@ -4,7 +4,6 @@
   const CHANNEL = '__DEVTOOLS_PRO__';
   const SOURCE_PAGE = 'page';
   const SOURCE_CONTENT = 'content';
-  const AUTO_FORWARD_TIMEOUT_MS = 30000;
 
   if (window.__DEVTOOLS_PRO_PAGE_HOOKED__) {
     window.postMessage(
@@ -91,16 +90,6 @@
     });
   }
 
-  function scheduleAutoForward(requestId) {
-    setTimeout(() => {
-      const pending = pendingRequests.get(requestId);
-      if (!pending) return;
-
-      pendingRequests.delete(requestId);
-      pending.forward({});
-    }, AUTO_FORWARD_TIMEOUT_MS);
-  }
-
   const originalFetch = window.fetch.bind(window);
   window.fetch = function devtoolsProFetch(input, init) {
     if (interceptMode === 'off') {
@@ -155,7 +144,6 @@
         body: bodyToSerializable(init && init.body)
       });
 
-      scheduleAutoForward(requestId);
     });
   };
 
@@ -232,7 +220,6 @@
         body: bodyToSerializable(body)
       });
 
-      scheduleAutoForward(meta.id);
       return;
     }
   };
