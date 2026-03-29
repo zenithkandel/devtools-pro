@@ -23,6 +23,12 @@
       "all_frames": true
     }
   ],
+  "web_accessible_resources": [
+    {
+      "resources": ["src/injected.js"],
+      "matches": ["<all_urls>"]
+    }
+  ],
   "devtools_page": "src/devtools.html",
   "action": {
     "default_title": "DevTools Pro"
