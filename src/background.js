@@ -111,17 +111,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       break;
 
     case 'GET_TAB_DATA':
-      sendResponse(requestStorage.get(tabId) || initTabData(tabId));
+      sendResponse(requestStorage.get(actualTabId) || initTabData(actualTabId));
       break;
 
     case 'SET_INTERCEPT_MODE':
       {
-        const tabData = initTabData(tabId);
+        const tabData = initTabData(actualTabId);
         tabData.interceptMode = data.mode;
         tabData.pausedJs = data.mode === 'no-js';
 
         // Notify content script of mode change
-        chrome.tabs.sendMessage(tabId, {
+        chrome.tabs.sendMessage(actualTabId, {
           type: 'INTERCEPT_MODE_CHANGED',
           mode: data.mode,
           pauseJs: tabData.pausedJs
@@ -133,7 +133,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     case 'INTERCEPT_REQUEST':
       {
-        const tabData = initTabData(tabId);
+        const tabData = initTabData(actualTabId);
         tabData.interceptQueue.push({
           requestId: data.requestId,
           status: 'pending',
@@ -141,8 +141,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         });
 
         // Send message to devtools
-        if (devtoolsConnections.has(tabId)) {
-          devtoolsConnections.get(tabId).postMessage({
+        if (devtoolsConnections.has(actualTabId)) {
+          devtoolsConnections.get(actualTabId).postMessage({
             type: 'REQUEST_INTERCEPTED',
             data: {
               requestId: data.requestId,
@@ -157,7 +157,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     case 'FORWARD_REQUEST':
       {
-        const tabData = initTabData(tabId);
+        const tabData = initTabData(actualTabId);
         // Store modifications if any
         if (data.modifications) {
           const request = tabData.requestMap.get(data.requestId);
@@ -172,7 +172,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         );
 
         // Notify content script to proceed
-        chrome.tabs.sendMessage(tabId, {
+        chrome.tabs.sendMessage(actualTabId, {
           type: 'PROCEED_REQUEST',
           requestId: data.requestId,
           modifications: data.modifications
@@ -184,12 +184,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     case 'DROP_REQUEST':
       {
-        const tabData = initTabData(tabId);
+        const tabData = initTabData(actualTabId);
         tabData.interceptQueue = tabData.interceptQueue.filter(
           (item) => item.requestId !== data.requestId
         );
 
-        chrome.tabs.sendMessage(tabId, {
+        chrome.tabs.sendMessage(actualTabId, {
           type: 'DROP_REQUEST',
           requestId: data.requestId
         });
@@ -200,7 +200,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     case 'CLEAR_REQUESTS':
       {
-        const tabData = initTabData(tabId);
+        const tabData = initTabData(actualTabId);
         tabData.requests = [];
         tabData.requestMap.clear();
         sendResponse({ cleared: true });
@@ -209,7 +209,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     case 'GET_REQUEST_BODY':
       {
-        const tabData = requestStorage.get(tabId);
+        const tabData = requestStorage.get(actualTabId);
         if (tabData) {
           const request = tabData.requestMap.get(data.requestId);
           sendResponse({ body: request ? request.requestBody : '' });
@@ -219,7 +219,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     case 'GET_RESPONSE_BODY':
       {
-        const tabData = requestStorage.get(tabId);
+        const tabData = requestStorage.get(actualTabId);
         if (tabData) {
           const request = tabData.requestMap.get(data.requestId);
           sendResponse({ body: request ? request.responseBody : '' });

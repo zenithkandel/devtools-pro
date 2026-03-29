@@ -196,21 +196,19 @@ class DevToolsProPanel {
     this.networkTbody.innerHTML = toRender
       .map(
         (req) => `
-        <tr data-request-id="${req.id}" class="request-row ${
-          req.id === this.selectedRequestId ? 'selected' : ''
-        }">
+        <tr data-request-id="${req.id}" class="request-row ${req.id === this.selectedRequestId ? 'selected' : ''
+          }">
           <td>${this.getFileNameFromUrl(req.url)}</td>
-          <td><span class="status-${this.getStatusClass(req.statusCode)}">${
-          req.statusCode || '-'
-        }</span></td>
+          <td><span class="status-${this.getStatusClass(req.statusCode)}">${req.statusCode || '-'
+          }</span></td>
           <td>${req.type || '-'}</td>
           <td>${this.formatSize(req.size)}</td>
           <td>${req.duration > 0 ? req.duration.toFixed(2) + ' ms' : '-'}</td>
           <td>
             <div class="waterfall" style="width: ${Math.min(
-              (req.duration || 0) / 10,
-              100
-            )}px; background: #0e639c;"></div>
+            (req.duration || 0) / 10,
+            100
+          )}px; background: #0e639c;"></div>
           </td>
         </tr>
       `
@@ -268,26 +266,24 @@ class DevToolsProPanel {
       '<h4>Request Headers</h4>' +
       (request.requestHeaders && request.requestHeaders.length > 0
         ? request.requestHeaders
-            .map(
-              (h) =>
-                `<div class="header-item"><div class="header-name">${h.name || h}:</div><div class="header-value">${
-                  h.value || ''
-                }</div></div>`
-            )
-            .join('')
+          .map(
+            (h) =>
+              `<div class="header-item"><div class="header-name">${h.name || h}:</div><div class="header-value">${h.value || ''
+              }</div></div>`
+          )
+          .join('')
         : '<div style="color: #999;">No request headers</div>');
 
     const responseHeadersDiv = document.getElementById('response-headers');
     responseHeadersDiv.innerHTML =
       request.responseHeaders && request.responseHeaders.length > 0
         ? request.responseHeaders
-            .map(
-              (h) =>
-                `<div class="header-item"><div class="header-name">${h.name || h}:</div><div class="header-value">${
-                  h.value || ''
-                }</div></div>`
-            )
-            .join('')
+          .map(
+            (h) =>
+              `<div class="header-item"><div class="header-name">${h.name || h}:</div><div class="header-value">${h.value || ''
+              }</div></div>`
+          )
+          .join('')
         : '<div style="color: #999;">No response headers</div>';
   }
 

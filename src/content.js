@@ -209,11 +209,16 @@ let currentInterceptMode = 'off';
 const pendingInterceptions = new Map(); // requestId -> { request, timeout }
 
 /**
- * Get the current tab ID
+ * Get the current tab ID immediately
  */
-chrome.runtime.sendMessage({ type: 'GET_TAB_ID' }, (response) => {
-  tabId = response.tabId;
-});
+function initTabId() {
+  chrome.runtime.sendMessage({ type: 'GET_TAB_ID' }, (response) => {
+    if (response) {
+      tabId = response.tabId;
+      console.log('[DevTools Pro] Content script initialized for tab:', tabId);
+    }
+  });
+}
 
 /**
  * Listen for messages from the page context
@@ -343,5 +348,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   return true;
 });
+
+// Initialize tab ID
+initTabId();
 
 console.log('[DevTools Pro] Content script loaded');
