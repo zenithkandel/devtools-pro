@@ -104,8 +104,9 @@ class DevToolsProPanel {
       (response) => {
         if (response) {
           this.requests = response.requests || [];
+          this.requestMap = new Map(this.requests.map((req) => [req.id, req]));
           this.interceptMode = response.interceptMode || 'off';
-          this.interceptQueue = response.interceptQueue || [];
+          this.interceptQueue = this.normalizeInterceptQueue(response.interceptQueue);
           this.renderNetworkTable();
           this.updateIntrudeModeUI();
         }
@@ -119,7 +120,9 @@ class DevToolsProPanel {
     switch (type) {
       case 'INITIAL_STATE':
         this.requests = data.requests || [];
-        this.interceptQueue = data.interceptQueue || [];
+        this.requestMap = new Map(this.requests.map((req) => [req.id, req]));
+        this.interceptMode = data.interceptMode || this.interceptMode;
+        this.interceptQueue = this.normalizeInterceptQueue(data.interceptQueue);
         this.renderNetworkTable();
         this.updateIntrudeModeUI();
         break;
@@ -136,11 +139,31 @@ class DevToolsProPanel {
         break;
 
       case 'REQUEST_INTERCEPTED':
-        this.interceptQueue.push({
-          requestId: data.requestId,
-          request: data.request,
-          status: 'pending'
-        });
+        {
+          const item = {
+            requestId: data.requestId,
+            request: data.request || {
+              id: data.requestId,
+              method: 'UNKNOWN',
+              url: 'Unknown URL',
+              requestHeaders: [],
+              requestBody: ''
+            },
+            status: 'pending'
+          };
+
+          const existingIndex = this.interceptQueue.findIndex(
+            (queueItem) => queueItem.requestId === data.requestId
+          );
+
+          if (existingIndex >= 0) {
+            this.interceptQueue[existingIndex] = item;
+          } else {
+            this.interceptQueue.push(item);
+          }
+
+          this.requestMap.set(item.request.id, item.request);
+        }
         this.updateIntrudeModeUI();
         this.renderInterceptionQueue();
         break;
@@ -151,6 +174,27 @@ class DevToolsProPanel {
         this.renderNetworkTable();
         break;
     }
+  }
+
+  normalizeInterceptQueue(queue) {
+    if (!Array.isArray(queue)) return [];
+
+    return queue
+      .filter((item) => item && item.requestId)
+      .map((item) => ({
+        requestId: item.requestId,
+        request: item.request || {
+          id: item.requestId,
+          method: item.method || 'UNKNOWN',
+          url: item.url || 'Unknown URL',
+          requestHeaders: Array.isArray(item.requestHeaders)
+            ? item.requestHeaders
+            : [],
+          requestBody: item.requestBody || ''
+        },
+        status: item.status || 'pending',
+        modifications: item.modifications || {}
+      }));
   }
 
   switchTab(tabName) {
@@ -392,16 +436,22 @@ class DevToolsProPanel {
 
     this.intrudeQueue.innerHTML = this.interceptQueue
       .map(
-        (item) => `
+        (item) => {
+          const request = item.request || {};
+          const method = request.method || 'UNKNOWN';
+          const url = request.url || 'Unknown URL';
+
+          return `
         <div class="queue-item" data-request-id="${item.requestId}">
-          <div class="queue-item-method">${item.request?.method || 'UNKNOWN'}</div>
-          <div class="queue-item-url">${item.request?.url || 'Unknown URL'}</div>
+          <div class="queue-item-method">${method}</div>
+          <div class="queue-item-url">${url}</div>
           <div class="queue-item-actions">
             <button class="edit-btn" data-request-id="${item.requestId}">Edit</button>
             <button class="drop-btn" data-request-id="${item.requestId}">Drop</button>
           </div>
         </div>
-      `
+      `;
+        }
       )
       .join('');
 
@@ -422,14 +472,20 @@ class DevToolsProPanel {
     const item = this.interceptQueue.find((q) => q.requestId === requestId);
     if (!item) return;
 
-    const request = item.request;
-    document.getElementById('editor-title').textContent = `Modify: ${item.request?.method} ${this.getFileNameFromUrl(
+    const request = item.request || {
+      method: 'UNKNOWN',
+      url: 'Unknown URL',
+      requestHeaders: [],
+      requestBody: ''
+    };
+
+    document.getElementById('editor-title').textContent = `Modify: ${request.method} ${this.getFileNameFromUrl(
       request.url
     )}`;
 
     // Populate headers
     this.headersEditor.innerHTML = '';
-    if (request.requestHeaders) {
+    if (Array.isArray(request.requestHeaders)) {
       request.requestHeaders.forEach((header) => {
         this.addHeaderRow(header.name || header, header.value || '');
       });
