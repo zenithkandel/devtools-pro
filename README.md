@@ -5,6 +5,7 @@ A professional network request monitoring and interception tool for Chrome DevTo
 ## Features
 
 ### Network Monitor Tab
+
 - **Real-time Request Monitoring**: Capture all network requests made by web pages
 - **Comprehensive Request Details**: View headers, body, response, and timing information
 - **Smart Filtering**: Filter requests by name, path, status code, or type
@@ -12,15 +13,18 @@ A professional network request monitoring and interception tool for Chrome DevTo
 - **One-Click Details**: Click any request to see full request/response details
 
 ### Intrude Mode Tab
+
 Intercept and modify network requests in real-time (similar to Burp Suite):
 
 #### Mode 1: No JS, No Forward
+
 - Pauses JavaScript execution on the page
 - Intercepts all network requests
 - Allows modifying request headers and body
 - Forward, drop, or modify each request before it's sent
 
 #### Mode 2: Yes JS, No Forward
+
 - Allows normal JavaScript execution
 - Intercepts network requests
 - Allows modifying request headers and body
@@ -101,6 +105,7 @@ DevTools Panel
 ### Manifest V3 Compatibility
 
 This extension uses Manifest V3 features:
+
 - Service worker (background.js) instead of persistent background page
 - `webRequest` API for monitoring (inspection-only)
 - Content script-based fetch/XHR interception for actual request modification
@@ -109,6 +114,7 @@ This extension uses Manifest V3 features:
 ### Request Interception
 
 Request interception is implemented at the page context level by:
+
 1. Injecting a page context script that wraps `fetch()` and `XMLHttpRequest`
 2. Queuing intercepted requests when a mode is enabled
 3. Pausing JavaScript execution (in no-js mode) until user responds
