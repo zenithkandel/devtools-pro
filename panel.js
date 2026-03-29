@@ -31,6 +31,11 @@ const state = {
   jsEnabled: true,         // runtime JS state while attached
   queue: [],              // intercepted requests pending action
   selectedQueueId: null,
+
+  // Websocket Intrude tab
+  wsAttached: false,
+  wsMessages: [], // intercepted websocket messages
+  wsSelectedMessageId: null,
 };
 
 // Background port
