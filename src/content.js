@@ -1,58 +1,7 @@
 // DevTools Pro - Content Script
 // Handles fetch/XHR interception and communication with background
 
-/**
- * Inject the external page context script
- * This runs in the page context to intercept fetch/XHR
- */
-function injectPageContextScript() {
-  try {
-    const script = document.createElement('script');
-    script.src = chrome.runtime.getURL('src/injected.js');
-    script.type = 'text/javascript';
-    script.onload = () => {
-      console.log('[DevTools Pro] injected.js loaded successfully');
-      script.remove();
-    };
-    script.onerror = (error) => {
-      console.error('[DevTools Pro] Failed to load injected.js:', error);
-      script.remove();
-    };
-
-    // Try to insert immediately
-    if (document.documentElement) {
-      document.documentElement.insertBefore(script, document.documentElement.firstChild);
-    } else {
-      // If document element doesn't exist, wait for it
-      function tryInject() {
-        if (document.documentElement) {
-          const s = document.createElement('script');
-          s.src = chrome.runtime.getURL('src/injected.js');
-          s.type = 'text/javascript';
-          s.onload = () => s.remove();
-          s.onerror = () => s.remove();
-          document.documentElement.insertBefore(s, document.documentElement.firstChild);
-        } else {
-          setTimeout(tryInject, 10);
-        }
-      }
-      tryInject();
-    }
-  } catch (e) {
-    console.error('[DevTools Pro] Error in injectPageContextScript:', e);
-  }
-}
-
-// Inject script at the earliest opportunity
-if (document.readyState === 'loading') {
-  // DOM is still loading
-  injectPageContextScript();
-  // Also try again on DOMContentLoaded as fallback
-  document.addEventListener('DOMContentLoaded', injectPageContextScript, true);
-} else {
-  // DOM is already loaded
-  injectPageContextScript();
-}
+// src/injected.js is now loaded as a MAIN world content script via manifest.
 
 // Rest of content script code
 let tabId = null;
@@ -76,18 +25,28 @@ function initTabId() {
  */
 window.addEventListener('message', (event) => {
   if (event.source !== window) return;
+  if (!event.data || typeof event.data.type !== 'string') return;
 
   const { type, requestId, method, url, headers, body } = event.data;
-
-  if (!tabId) return;
 
   switch (type) {
     case 'PAGE_CONTEXT_READY':
       console.log('[DevTools Pro] Page context script injected successfully');
+
+      // If mode changed before MAIN world script initialized, re-sync now.
+      window.postMessage(
+        {
+          type: 'SET_INTERCEPT_MODE',
+          mode: currentInterceptMode
+        },
+        '*'
+      );
       break;
 
     case 'INTERCEPT_FETCH':
     case 'INTERCEPT_XHR':
+      if (!tabId) return;
+
       if (currentInterceptMode !== 'off') {
         // Send to devtools via background
         chrome.runtime.sendMessage({
@@ -133,7 +92,7 @@ window.addEventListener('message', (event) => {
  * Listen for messages from background script
  */
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  const { type, mode, pauseJs } = request;
+  const { type, mode } = request;
 
   switch (type) {
     case 'INTERCEPT_MODE_CHANGED':

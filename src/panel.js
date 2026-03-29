@@ -397,13 +397,25 @@ class DevToolsProPanel {
           <div class="queue-item-method">${item.request?.method || 'UNKNOWN'}</div>
           <div class="queue-item-url">${item.request?.url || 'Unknown URL'}</div>
           <div class="queue-item-actions">
-            <button class="edit-btn" onclick="panel.editRequest('${item.requestId}')">Edit</button>
-            <button class="drop-btn" onclick="panel.dropRequest('${item.requestId}')">Drop</button>
+            <button class="edit-btn" data-request-id="${item.requestId}">Edit</button>
+            <button class="drop-btn" data-request-id="${item.requestId}">Drop</button>
           </div>
         </div>
       `
       )
       .join('');
+
+    this.intrudeQueue.querySelectorAll('.edit-btn').forEach((button) => {
+      button.addEventListener('click', () => {
+        this.editRequest(button.dataset.requestId);
+      });
+    });
+
+    this.intrudeQueue.querySelectorAll('.drop-btn').forEach((button) => {
+      button.addEventListener('click', () => {
+        this.dropRequest(button.dataset.requestId);
+      });
+    });
   }
 
   editRequest(requestId) {
@@ -541,6 +553,3 @@ let panel;
 document.addEventListener('DOMContentLoaded', () => {
   panel = new DevToolsProPanel();
 });
-
-// Export for onclick handlers in HTML
-window.panel = panel;
