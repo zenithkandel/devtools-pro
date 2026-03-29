@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "DevTools Pro",
+  "version": "2.0.0",
+  "description": "DevTools panel for network monitoring and request interception",
+  "permissions": ["tabs", "scripting", "webRequest"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "run_at": "document_start",
+      "js": ["src/injected.js"],
+      "all_frames": true,
+      "world": "MAIN"
+    },
+    {
+      "matches": ["<all_urls>"],
+      "run_at": "document_start",
+      "js": ["src/content.js"],
+      "all_frames": true
+    }
+  ],
+  "devtools_page": "src/devtools.html",
+  "action": {
+    "default_title": "DevTools Pro"
+  }
+}
