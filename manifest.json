@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "DevTools Pro",
+  "version": "1.0.0",
+  "description": "Professional network request monitoring and interception tool for Chrome DevTools",
+  "permissions": [
+    "webRequest",
+    "tabs",
+    "scripting",
+    "devtools"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "run_at": "document_start",
+      "js": ["src/content.js"],
+      "all_frames": true
+    }
+  ],
+  "devtools_page": "src/devtools.html",
+  "icons": {
+    "16": "assets/icons/icon-16.png",
+    "48": "assets/icons/icon-48.png",
+    "128": "assets/icons/icon-128.png"
+  },
+  "action": {
+    "default_title": "DevTools Pro"
+  }
+}
