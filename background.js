@@ -222,13 +222,13 @@ async function wsAttach(tabId) {
 
     // A more thorough injection is required for completely stopping inbound messages, 
     // but we'll focus on Network domain for monitoring and simple proxy for sending.
-    
+
     // Evaluate in all frames
     await cdp(tabId, 'Page.addScriptToEvaluateOnNewDocument', {
       source: proxyScript,
       worldName: 'WSIntruder'
     });
-    
+
     // Also inject into current execution context
     await cdp(tabId, 'Runtime.evaluate', { expression: proxyScript });
 
@@ -260,7 +260,7 @@ async function wsForward(tabId, messageId, payload, direction) {
       await cdp(tabId, 'Runtime.evaluate', { expression: expr });
     }
     sendToPanel(tabId, { type: 'ws:forwarded', messageId });
-  } catch(err) {
+  } catch (err) {
     sendToPanel(tabId, { type: 'error', message: err.message });
   }
 }
@@ -271,7 +271,7 @@ async function wsDrop(tabId, messageId) {
     const expr = `if (typeof window['__ws_resume_${messageId}'] === 'function') window['__ws_resume_${messageId}']('drop');`;
     await cdp(tabId, 'Runtime.evaluate', { expression: expr });
     sendToPanel(tabId, { type: 'ws:dropped', messageId });
-  } catch(err) {
+  } catch (err) {
     sendToPanel(tabId, { type: 'error', message: err.message });
   }
 }
@@ -280,7 +280,7 @@ async function wsCreateAndSend(tabId, payload) {
   try {
     const expr = `if (typeof window.__wsSendCustom === 'function') window.__wsSendCustom(${JSON.stringify(payload)});`;
     await cdp(tabId, 'Runtime.evaluate', { expression: expr });
-  } catch(err) {
+  } catch (err) {
     sendToPanel(tabId, { type: 'error', message: err.message });
   }
 }
@@ -379,6 +379,46 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     case 'Debugger.resumed':
       sendToPanel(tabId, { type: 'js:resumed' });
       break;
+
+    case 'Runtime.consoleAPICalled':
+      if (params.type === 'debug' && wsAttachedTabs.has(tabId)) {
+        const arg = params.args[0];
+        if (arg && arg.type === 'string' && arg.value === '__WSPROXY_OUT__') {
+          try {
+            const dataArg = params.args[1];
+            if (dataArg && dataArg.type === 'string') {
+              const msgData = JSON.parse(dataArg.value);
+              sendToPanel(tabId, {
+                type: 'ws:messagePaused',
+                messageId: msgData.id,
+                payload: msgData.data,
+                direction: 'sent',
+                timestamp: Date.now()
+              });
+            }
+          } catch(e) {}
+        }
+      }
+      break;
+
+    case 'Network.webSocketFrameReceived':
+      if (wsAttachedTabs.has(tabId)) {
+        // Just monitor incoming frames, since intercepting incoming synchronously requires more complex proxying
+        // For Intruder we'll log it as a paused 'recv' message that they can "Forward" to clear from queue
+        // (Even if it already arrived, for the sake of monitoring UI consistency)
+        sendToPanel(tabId, {
+          type: 'ws:messagePaused',
+          messageId: 'ws_recv_' + Math.random().toString(36).substring(2, 9),
+          payload: params.response.payloadData,
+          direction: 'recv',
+          timestamp: params.timestamp * 1000
+        });
+      }
+      break;
+      
+    // Similarly for webSocketFrameSent if we wanted to only monitor and not proxy
+    // But we are proxying sends via Runtime.evaluate, so we might see duplicates if Network domain reports it too.
+    // For now we'll rely on the proxy for sends to actually block them.
   }
 });
 
