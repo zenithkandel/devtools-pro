@@ -2,6 +2,7 @@
 // Handles fetch/XHR interception and communication with background
 
 // src/injected.js is now loaded as a MAIN world content script via manifest.
+const CSP_SAFE_BUILD_MARKER = 'csp-main-world-2026-03-29';
 
 // Rest of content script code
 let tabId = null;
@@ -162,4 +163,4 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 // Initialize tab ID
 initTabId();
 
-console.log('[DevTools Pro] Content script loaded');
+console.log('[DevTools Pro] Content script loaded:', CSP_SAFE_BUILD_MARKER);
