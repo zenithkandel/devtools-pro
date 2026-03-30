@@ -1,6 +1,8 @@
 /**
  * panel.js — DevTools Pro
- * Handles: Network tab, HTTP Intrude tab, WS Intruder tab.
+ *
+ * Runs in the DevTools panel context.
+ * Communicates with background.js via chrome.runtime.connect.
  */
 
 'use strict';
@@ -9,1089 +11,1012 @@
 // ─── STATE ────────────────────────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════════
 
+const tabId = chrome.devtools.inspectedWindow.tabId;
+
 const state = {
-  // Network log
-  requests:         [],
-  selectedReqId:    null,
-  filterText:       '',
-  filterType:       'All',
-  preserveLog:      false,
-  recording:        true,
-  activeDetailTab:  'headers',
-  logEpoch:         null,
+  // UI
+  activeTab: 'network',   // 'network' | 'intrude' | 'websocket'
+  activeDetailTab: 'headers',
 
-  // HTTP Intrude
-  intrudeEnabled:       false,
-  intrudeMode:          'no-js',
-  intercepted:          [],
-  selectedIntercept:    null,
-  jsCurrentlyDisabled:  false,
+  // Network tab
+  requests: [],           // collected HAR-ish entries
+  selectedRequest: null,
+  recording: true,
+  urlFilter: '',
+  methodFilter: 'ALL',
 
-  // WS Intruder
-  ws: {
-    monitoring:       false,
-    intruding:        false,
-    sockets:          [],   // { requestId, url, status:'open'|'closed', opened, closed, outCount, inCount }
-    selectedSocketId: null,
-    messages:         [],   // { id, requestId, direction:'out'|'in', data, dataType, opcode, ts, status:'live'|'intercepted'|'forwarded'|'dropped' }
-    interceptQueue:   [],   // subset of messages where status==='intercepted'
-    selectedMsgId:    null, // selected in intercept drawer
-    msgSeq:           0,
-  },
+  // Intrude tab
+  attached: false,
+  intrudeMode: 'no-js',   // 'no-js' | 'yes-js'
+  jsEnabled: true,         // runtime JS state while attached
+  queue: [],              // intercepted requests pending action
+  selectedQueueId: null,
+
+  // Websocket Intrude tab
+  wsAttached: false,
+  wsMessages: [], // intercepted websocket messages
+  wsSelectedMessageId: null,
 };
 
-let reqIdCounter = 0;
+// Background port
+let port = null;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ─── BACKGROUND PORT ──────────────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const tabId = chrome.devtools.inspectedWindow.tabId;
-const port  = chrome.runtime.connect({ name: 'devtools-pro' });
+function connectBackground() {
+  port = chrome.runtime.connect({ name: `panel_${tabId}` });
+  port.onMessage.addListener(onBackgroundMessage);
+  port.onDisconnect.addListener(() => {
+    port = null;
+    if (state.attached) {
+      state.attached = false;
+      updateIntrudeUI();
+      toast('Background disconnected — intrude detached.', 'warning');
+    }
+    setTimeout(connectBackground, 1500);
+  });
+}
 
-port.postMessage({ type: 'INIT', tabId });
+function sendBg(msg) {
+  if (port) {
+    try { port.postMessage(msg); }
+    catch (_) { toast('Port error — reconnecting…', 'error'); }
+  }
+}
 
-port.onMessage.addListener((msg) => {
+function onBackgroundMessage(msg) {
   switch (msg.type) {
 
-    // HTTP Intrude
-    case 'REQUEST_PAUSED':    handleInterceptedRequest(msg); break;
-    case 'INTERCEPT_ENABLED': onInterceptEnabled(msg.options); break;
-    case 'INTERCEPT_DISABLED':onInterceptDisabled(); break;
-    case 'JS_TOGGLED':
-      state.jsCurrentlyDisabled = msg.disabled;
-      updateJsStatusBadge(); updateJsToggleBtn(); break;
-    case 'REQUEST_CONTINUED':
-    case 'REQUEST_DROPPED':   removeFromQueue(msg.requestId); break;
-    case 'ALL_FORWARDED':
-      state.intercepted = []; state.selectedIntercept = null;
-      renderQueue(); renderEditor(); updateForwardAllBtn(); break;
-    case 'DEBUGGER_DETACHED':
-      if (state.intrudeEnabled) { state.intrudeEnabled = false; state.jsCurrentlyDisabled = false; syncInterceptToggleUI(); updateJsStatusBadge(); }
-      if (state.ws.monitoring)  { state.ws.monitoring = false; state.ws.intruding = false; updateWsControlsUI(); }
+    case 'intrude:attached':
+      state.attached = true;
+      state.jsEnabled = (msg.mode !== 'no-js');
+      updateIntrudeUI();
+      toast(`Attached in ${msg.mode === 'no-js' ? 'No JS · No Forward' : 'Yes JS · No Forward'} mode.`, 'success');
       break;
 
-    // WS Monitor
-    case 'WS_MONITOR_STARTED': state.ws.monitoring = true; updateWsControlsUI(); break;
-    case 'WS_MONITOR_STOPPED': state.ws.monitoring = false; state.ws.intruding = false; updateWsControlsUI(); break;
+    case 'intrude:detached':
+      state.attached = false;
+      state.queue = [];
+      state.selectedQueueId = null;
+      updateIntrudeUI();
+      renderQueue();
+      renderEditor();
+      toast(msg.reason ? `Detached: ${msg.reason}` : 'Detached.', 'info');
+      break;
 
-    case 'WS_CREATED':    wsOnCreated(msg); break;
-    case 'WS_CLOSED':     wsOnClosed(msg);  break;
-    case 'WS_HANDSHAKE':  /* optional: could update socket info */ break;
-    case 'WS_FRAME_SENT':     wsOnFrame(msg, 'out'); break;
-    case 'WS_FRAME_RECEIVED': wsOnFrame(msg, 'in');  break;
-    case 'WS_FRAME_ERROR':    wsOnFrameError(msg);   break;
+    case 'intrude:requestPaused':
+      addToQueue(msg);
+      break;
 
-    // WS Intrude
-    case 'WS_INTRUDE_ENABLED':  state.ws.intruding = true;  updateWsControlsUI(); showWsDrawer(true);  break;
-    case 'WS_INTRUDE_DISABLED': state.ws.intruding = false; updateWsControlsUI(); showWsDrawer(false); releaseAllIntercepted(); break;
-    case 'WS_INTERCEPTED':  wsOnIntercepted(msg); break;
-    case 'WS_FORWARDED':    wsSetMsgStatus(msg.msgId, 'forwarded'); break;
-    case 'WS_DROPPED':      wsSetMsgStatus(msg.msgId, 'dropped');   break;
-    case 'WS_CUSTOM_SENT':  break;
+    case 'intrude:forwarded':
+      removeFromQueue(msg.requestId, 'Forwarded');
+      break;
 
-    case 'ERROR': console.error('[DevTools Pro]', msg.message); break;
+    case 'intrude:dropped':
+      removeFromQueue(msg.requestId, 'Dropped');
+      break;
+
+    case 'js:enabled':
+      state.jsEnabled = true;
+      updateJsToggle();
+      toast('JavaScript enabled.', 'success');
+      break;
+
+    case 'js:disabled':
+      state.jsEnabled = false;
+      updateJsToggle();
+      toast('JavaScript disabled.', 'warning');
+      break;
+
+    // ── WS Intruder events ──────────────────────────────
+    case 'ws:attached':
+      state.wsAttached = true;
+      updateWsUI();
+      toast('WebSocket Intruder attached.', 'success');
+      break;
+
+    case 'ws:detached':
+      state.wsAttached = false;
+      state.wsMessages = [];
+      state.wsSelectedMessageId = null;
+      updateWsUI();
+      renderWsQueue();
+      renderWsEditor();
+      toast(msg.reason ? `WS Detached: ${msg.reason}` : 'WS Detached.', 'info');
+      break;
+
+    case 'ws:messagePaused':
+      addToWsQueue(msg);
+      break;
+
+    case 'ws:socketDetected':
+      addToWsQueue({
+        messageId: `ws_info_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        direction: 'info',
+        payload: `[OPEN] ${msg.url || 'unknown websocket url'}`,
+        timestamp: msg.timestamp || Date.now(),
+      });
+      toast(`WebSocket detected: ${shortenUrl(msg.url || 'unknown', 60)}`, 'info');
+      break;
+
+    case 'ws:forwarded':
+      removeFromWsQueue(msg.messageId, 'Forwarded');
+      break;
+
+    case 'ws:dropped':
+      removeFromWsQueue(msg.messageId, 'Dropped');
+      break;
+
+    case 'ws:created':
+      toast('Custom WebSocket message sent.', 'success');
+      break;
+
+    case 'error':
+      toast(msg.message, 'error');
+      break;
   }
-});
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ─── NETWORK MONITORING ───────────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════════
 
-chrome.devtools.network.onRequestFinished.addListener((entry) => {
+chrome.devtools.network.onRequestFinished.addListener((harEntry) => {
   if (!state.recording) return;
 
-  const id   = ++reqIdCounter;
-  const type = classifyType(entry);
-  const size = entry.response.bodySize > 0 ? entry.response.bodySize : (entry.response._transferSize || 0);
+  const req = harEntry.request;
+  const res = harEntry.response;
 
-  const req = {
-    id, entry, type, size,
-    url:     entry.request.url,
-    method:  entry.request.method,
-    status:  entry.response.status,
-    time:    entry.time,
-    started: new Date(entry.startedDateTime).getTime(),
-    timings: entry.timings || {},
+  const entry = {
+    id: generateId(),
+    method: req.method,
+    url: req.url,
+    status: res.status,
+    statusText: res.statusText,
+    mimeType: res.content?.mimeType ?? '',
+    size: res.bodySize > 0 ? res.bodySize : (res.content?.size ?? 0),
+    time: harEntry.time ?? 0,
+    startedAt: harEntry.startedDateTime,
+    reqHeaders: req.headers ?? [],
+    resHeaders: res.headers ?? [],
+    postData: req.postData ?? null,
+    timings: harEntry.timings ?? {},
+    _har: harEntry,
   };
 
-  if (!state.logEpoch) state.logEpoch = req.started;
-
-  state.requests.push(req);
-  renderRow(req);
+  state.requests.push(entry);
+  appendRequestRow(entry);
   updateStatusBar();
-});
-
-chrome.devtools.network.onNavigated.addListener(() => {
-  if (!state.preserveLog) {
-    state.requests = []; state.selectedReqId = null; state.logEpoch = null; reqIdCounter = 0;
-    clearTableBody(); hideDetail(); updateStatusBar(); showEmptyState(true);
-  }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ─── NETWORK TABLE ────────────────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const tbody      = document.getElementById('request-tbody');
-const emptyState = document.getElementById('empty-state');
-
-function classifyType(entry) {
-  const rt = entry._resourceType;
-  if (rt) {
-    if (rt === 'xhr' || rt === 'fetch')       return 'Fetch/XHR';
-    if (rt === 'script')                      return 'JS';
-    if (rt === 'stylesheet')                  return 'CSS';
-    if (rt === 'image' || rt === 'imageset')  return 'Img';
-    if (rt === 'media')                       return 'Media';
-    if (rt === 'font')                        return 'Font';
-    if (rt === 'document')                    return 'Doc';
-    if (rt === 'websocket')                   return 'WS';
-  }
-  const mime = (entry.response.content?.mimeType || '').toLowerCase();
-  if (mime.includes('javascript')) return 'JS';
-  if (mime.includes('css'))        return 'CSS';
-  if (mime.includes('html'))       return 'Doc';
-  if (mime.startsWith('image/'))   return 'Img';
-  if (mime.startsWith('font/') || mime.includes('font')) return 'Font';
-  if (mime.startsWith('video/') || mime.startsWith('audio/')) return 'Media';
-  return 'Other';
+function filteredRequests() {
+  return state.requests.filter(r => {
+    if (state.methodFilter !== 'ALL' && r.method !== state.methodFilter) return false;
+    if (state.urlFilter && !r.url.toLowerCase().includes(state.urlFilter.toLowerCase())) return false;
+    return true;
+  });
 }
 
-function matchesFilter(req) {
-  if (state.filterType !== 'All' && req.type !== state.filterType) return false;
-  if (state.filterText && !req.url.toLowerCase().includes(state.filterText.toLowerCase())) return false;
+function rebuildTable() {
+  const body = $('request-list-body');
+  body.innerHTML = '';
+  const empty = $('net-empty');
+  const rows = filteredRequests();
+
+  if (rows.length === 0) {
+    body.appendChild(createEmpty('📡', 'Listening for network requests…\nReload the page to capture traffic.'));
+    return;
+  }
+
+  rows.forEach(r => body.appendChild(makeRequestRow(r)));
+  updateStatusBar();
+}
+
+function appendRequestRow(entry) {
+  $('net-empty')?.remove();
+  if (!matchesFilter(entry)) return;
+  $('request-list-body').appendChild(makeRequestRow(entry));
+  updateStatusBar();
+}
+
+function matchesFilter(r) {
+  if (state.methodFilter !== 'ALL' && r.method !== state.methodFilter) return false;
+  if (state.urlFilter && !r.url.toLowerCase().includes(state.urlFilter.toLowerCase())) return false;
   return true;
 }
 
-function formatSize(bytes) {
-  if (bytes <= 0) return '—';
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1048576) return `${(bytes/1024).toFixed(1)} kB`;
-  return `${(bytes/1048576).toFixed(2)} MB`;
+function makeRequestRow(entry) {
+  const row = document.createElement('div');
+  row.className = 'request-row net-grid';
+  row.dataset.id = entry.id;
+
+  const shortUrl = shortenUrl(entry.url);
+  const type = mimeToType(entry.mimeType);
+
+  row.innerHTML = `
+    <span class="method-badge m-${entry.method}">${entry.method}</span>
+    <span>${statusBadge(entry.status)}</span>
+    <span style="color:var(--text-2);font-size:9.5px;">${esc(type)}</span>
+    <span class="col-url" title="${esc(entry.url)}">${esc(shortUrl)}</span>
+    <span style="color:var(--text-1);">${formatBytes(entry.size)}</span>
+    <span style="color:var(--text-1);">${formatTime(entry.time)}</span>
+  `;
+
+  row.addEventListener('click', () => selectRequest(entry, row));
+  return row;
 }
 
-function formatTime(ms) {
-  if (ms <= 0) return '—';
-  if (ms < 1000) return `${Math.round(ms)} ms`;
-  return `${(ms/1000).toFixed(2)} s`;
-}
-
-function urlName(url) {
-  try {
-    const u = new URL(url);
-    const parts = u.pathname.split('/').filter(Boolean);
-    const last  = parts[parts.length - 1] || u.hostname;
-    return u.search ? last + u.search : last;
-  } catch { return url; }
-}
-
-function statusClass(status) {
-  if (status >= 500) return 'status-5xx';
-  if (status >= 400) return 'status-4xx';
-  if (status >= 300) return 'status-3xx';
-  if (status >= 200) return 'status-2xx';
-  return 'status-0';
-}
-
-function waterfallBar(req) {
-  const totalLogTime = Math.max(...state.requests.map(r => (r.started - state.logEpoch) + r.time), 1);
-  const offset = ((req.started - state.logEpoch) / totalLogTime) * 100;
-  const width  = Math.max((req.time / totalLogTime) * 100, 0.5);
-  const typeClass = { 'Fetch/XHR':'xhr','Doc':'doc','JS':'js','CSS':'css' }[req.type] || '';
-  return `<div class="waterfall-bar-wrap"><div class="waterfall-bar ${typeClass}" style="left:${offset.toFixed(1)}%;width:${width.toFixed(1)}%"></div></div>`;
-}
-
-function renderRow(req) {
-  if (!matchesFilter(req)) return;
-  showEmptyState(false);
-  const tr = document.createElement('tr');
-  tr.dataset.id = req.id;
-  tr.innerHTML = `
-    <td title="${req.url}">${urlName(req.url)}</td>
-    <td><span class="method-tag method-${req.method}">${req.method}</span></td>
-    <td class="${statusClass(req.status)}">${req.status || '—'}</td>
-    <td>${req.type}</td>
-    <td>${formatSize(req.size)}</td>
-    <td>${formatTime(req.time)}</td>
-    <td>${waterfallBar(req)}</td>`;
-  tr.addEventListener('click', () => selectRequest(req.id));
-  tbody.appendChild(tr);
-  if (state.selectedReqId === req.id) tr.classList.add('selected');
-}
-
-function reRenderTable() {
-  tbody.innerHTML = '';
-  let visible = 0;
-  for (const req of state.requests) { if (matchesFilter(req)) { renderRow(req); visible++; } }
-  showEmptyState(visible === 0);
-}
-
-function clearTableBody() { tbody.innerHTML = ''; }
-function showEmptyState(show) { emptyState.classList.toggle('hidden', !show); }
-
-function updateStatusBar() {
-  const visible = state.requests.filter(r => matchesFilter(r));
-  const totalBytes = visible.reduce((s, r) => s + r.size, 0);
-  const totalMs    = visible.reduce((s, r) => s + r.time, 0);
-  document.getElementById('stat-count').textContent       = `${visible.length} request${visible.length !== 1 ? 's' : ''}`;
-  document.getElementById('stat-transferred').textContent = `${formatSize(totalBytes)} transferred`;
-  document.getElementById('stat-time').textContent        = `Finish: ${formatTime(totalMs)}`;
+function selectRequest(entry, row) {
+  // De-select previous
+  document.querySelectorAll('.request-row.selected').forEach(r => r.classList.remove('selected'));
+  row.classList.add('selected');
+  state.selectedRequest = entry;
+  showDetailPane(entry);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ─── DETAIL PANE ──────────────────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const detailPane    = document.getElementById('detail-pane');
-const detailContent = document.getElementById('detail-content');
-
-function selectRequest(id) {
-  state.selectedReqId = id;
-  document.querySelectorAll('#request-tbody tr').forEach(tr => tr.classList.toggle('selected', tr.dataset.id == id));
-  showDetail();
-  renderDetailTab(state.activeDetailTab);
+function showDetailPane(entry) {
+  const pane = $('request-detail-pane');
+  pane.classList.remove('hidden');
+  renderDetailTab(state.activeDetailTab, entry);
 }
-function showDetail()  { detailPane.classList.add('visible'); }
-function hideDetail()  { detailPane.classList.remove('visible'); state.selectedReqId = null; document.querySelectorAll('#request-tbody tr').forEach(tr => tr.classList.remove('selected')); }
-function currentRequest() { return state.requests.find(r => r.id === state.selectedReqId) || null; }
 
-function renderDetailTab(tabName) {
-  state.activeDetailTab = tabName;
-  document.querySelectorAll('.detail-tab').forEach(btn => btn.classList.toggle('active', btn.dataset.dtab === tabName));
-  const req = currentRequest();
-  if (!req) { detailContent.innerHTML = ''; return; }
-  const e = req.entry;
-  switch (tabName) {
-    case 'headers':  renderHeadersTab(req, e);  break;
-    case 'payload':  renderPayloadTab(e);        break;
-    case 'response': renderResponseTab(e);       break;
-    case 'cookies':  renderCookiesTab(e);        break;
-    case 'timing':   renderTimingTab(req);       break;
+function renderDetailTab(dtab, entry) {
+  entry = entry ?? state.selectedRequest;
+  if (!entry) return;
+  const body = $('detail-content');
+  body.innerHTML = '';
+
+  switch (dtab) {
+    case 'headers': renderHeadersTab(body, entry); break;
+    case 'payload': renderPayloadTab(body, entry); break;
+    case 'response': renderResponseTab(body, entry); break;
+    case 'timing': renderTimingTab(body, entry); break;
   }
 }
 
-function headerRows(headers) {
-  return headers.map(h => `<div class="header-row"><span class="header-name">${esc(h.name)}:</span><span class="header-value">${esc(h.value)}</span></div>`).join('');
+function renderHeadersTab(container, entry) {
+  // General info
+  container.appendChild(kvSection('General', [
+    ['Request URL', entry.url],
+    ['Request Method', entry.method],
+    ['Status Code', `${entry.status} ${entry.statusText}`],
+    ['MIME Type', entry.mimeType],
+  ]));
+
+  // Response Headers
+  container.appendChild(headersSection('Response Headers', entry.resHeaders));
+
+  // Request Headers
+  container.appendChild(headersSection('Request Headers', entry.reqHeaders));
 }
 
-function renderHeadersTab(req, e) {
-  detailContent.innerHTML = `
-    <div class="header-section">
-      <div class="header-section-title">General</div>
-      <div class="header-row"><span class="header-name">Request URL:</span><span class="header-value">${esc(req.url)}</span></div>
-      <div class="header-row"><span class="header-name">Request Method:</span><span class="header-value">${esc(req.method)}</span></div>
-      <div class="header-row"><span class="header-name">Status Code:</span><span class="header-value ${statusClass(req.status)}">${req.status} ${esc(e.response.statusText)}</span></div>
-      <div class="header-row"><span class="header-name">Remote Address:</span><span class="header-value">${esc(e.serverIPAddress || '—')} ${e.connection ? ':' + e.connection : ''}</span></div>
-    </div>
-    <div class="header-section"><div class="header-section-title">Response Headers</div>${headerRows(e.response.headers)}</div>
-    <div class="header-section"><div class="header-section-title">Request Headers</div>${headerRows(e.request.headers)}</div>`;
-}
-
-function renderPayloadTab(e) {
-  if (!e.request.postData) { detailContent.innerHTML = '<span style="color:var(--text-muted);font-size:11px;">No request body</span>'; return; }
-  const pd = e.request.postData;
-  let html = '';
-  if (pd.params?.length) {
-    html += `<div class="header-section"><div class="header-section-title">Form Data</div>${pd.params.map(p => `<div class="header-row"><span class="header-name">${esc(p.name)}:</span><span class="header-value">${esc(p.value)}</span></div>`).join('')}</div>`;
+function renderPayloadTab(container, entry) {
+  if (!entry.postData) {
+    container.appendChild(createEmpty('📭', 'No request payload for this request.'));
+    return;
   }
-  if (pd.text) {
-    html += `<div class="header-section"><div class="header-section-title">Payload</div><pre class="pre-block">${esc(tryPrettyJson(pd.text))}</pre></div>`;
-  }
-  detailContent.innerHTML = html || '<span style="color:var(--text-muted)">Empty body</span>';
+  const pd = entry.postData;
+  container.appendChild(kvSection('Payload Info', [
+    ['Content-Type', pd.mimeType ?? ''],
+  ]));
+
+  const pre = document.createElement('div');
+  pre.className = 'pre-block';
+  pre.textContent = pd.text ?? '';
+  container.appendChild(pre);
 }
 
-function renderResponseTab(e) {
-  detailContent.innerHTML = '<span style="color:var(--text-muted);font-size:11px;">Loading…</span>';
-  e.getContent((content, encoding) => {
-    let text = content || '';
-    if (encoding === 'base64') { try { text = atob(text); } catch (_) {} }
-    const mime = (e.response.content?.mimeType || '').toLowerCase();
-    if (mime.includes('json')) text = tryPrettyJson(text);
-    detailContent.innerHTML = `<pre class="pre-block">${esc(text || '(empty response)')}</pre>`;
+function renderResponseTab(container, entry) {
+  entry._har.getContent((content, encoding) => {
+    const pre = document.createElement('div');
+    pre.className = 'pre-block';
+
+    if (encoding === 'base64') {
+      try {
+        const decoded = atob(content);
+        pre.textContent = tryPrettyJson(decoded);
+      } catch {
+        pre.textContent = '[binary content]';
+      }
+    } else {
+      pre.textContent = tryPrettyJson(content ?? '');
+    }
+
+    container.appendChild(pre);
   });
 }
 
-function renderCookiesTab(e) {
-  const cookieTable = (cookies) => cookies.length
-    ? cookies.map(c => `<div class="header-row"><span class="header-name">${esc(c.name)}:</span><span class="header-value">${esc(c.value)}</span></div>`).join('')
-    : '<span style="color:var(--text-muted);font-size:11px">None</span>';
-  detailContent.innerHTML = `
-    <div class="header-section"><div class="header-section-title">Request Cookies</div>${cookieTable(e.request.cookies || [])}</div>
-    <div class="header-section"><div class="header-section-title">Response Cookies</div>${cookieTable(e.response.cookies || [])}</div>`;
+function renderTimingTab(container, entry) {
+  const t = entry.timings;
+  const rows = [
+    ['Blocked', t.blocked, 'ms'],
+    ['DNS', t.dns, 'ms'],
+    ['SSL', t.ssl, 'ms'],
+    ['Connect', t.connect, 'ms'],
+    ['Send', t.send, 'ms'],
+    ['Wait (TTFB)', t.wait, 'ms'],
+    ['Receive', t.receive, 'ms'],
+    ['Total', entry.time, 'ms'],
+  ].filter(([, v]) => v != null && v >= 0);
+
+  container.appendChild(kvSection('Timings', rows.map(([k, ,]) => [k, rows.find(r => r[0] === k)[1].toFixed(2) + ' ms'])));
+
+  // Simple bar chart
+  const total = entry.time || 1;
+  const barWrap = document.createElement('div');
+  barWrap.style.cssText = 'margin-top:10px;';
+  rows.forEach(([label, val]) => {
+    if (val <= 0) return;
+    const pct = Math.min((val / total) * 100, 100).toFixed(1);
+    barWrap.innerHTML += `
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+        <span style="width:90px;color:var(--text-2);font-size:9px;">${label}</span>
+        <div style="flex:1;height:8px;background:var(--bg-3);border-radius:2px;overflow:hidden;">
+          <div style="width:${pct}%;height:100%;background:var(--cyan);border-radius:2px;"></div>
+        </div>
+        <span style="width:55px;text-align:right;color:var(--text-1);font-size:9px;">${val.toFixed(1)}ms</span>
+      </div>`;
+  });
+  container.appendChild(barWrap);
 }
 
-function renderTimingTab(req) {
-  const t = req.timings, total = req.time || 1;
-  const phases = [
-    { key:'blocked',label:'Blocked',cls:'blocked' },{ key:'dns',label:'DNS',cls:'dns' },
-    { key:'connect',label:'Connect',cls:'connect' },{ key:'ssl',label:'SSL',cls:'ssl' },
-    { key:'send',label:'Sending',cls:'send' },      { key:'wait',label:'Waiting',cls:'wait' },
-    { key:'receive',label:'Receiving',cls:'receive' },
-  ];
-  const rows = phases.map(p => {
-    const ms = t[p.key] > 0 ? t[p.key] : 0;
-    const pct = Math.max((ms / total) * 100, 0);
-    return `<div class="timing-row"><span class="timing-label">${p.label}</span><div class="timing-bar-wrap"><div class="timing-bar ${p.cls}" style="width:${pct.toFixed(1)}%"></div></div><span class="timing-value">${ms > 0 ? formatTime(ms) : '—'}</span></div>`;
-  }).join('');
-  detailContent.innerHTML = `<div class="header-section"><div class="header-section-title">Timing Breakdown</div>${rows}<div class="timing-row" style="margin-top:6px;border-top:1px solid var(--border);padding-top:6px"><span class="timing-label" style="color:var(--text)">Total</span><div class="timing-bar-wrap"><div class="timing-bar wait" style="width:100%"></div></div><span class="timing-value" style="color:var(--text)">${formatTime(total)}</span></div></div>`;
+// ─── Detail builders ──────────────────────────────────────────────────────────
+
+function kvSection(title, pairs) {
+  const wrap = document.createElement('div');
+  wrap.className = 'kv-section';
+  wrap.innerHTML = `<div class="kv-title">${esc(title)}</div>`;
+  pairs.forEach(([k, v]) => {
+    const row = document.createElement('div');
+    row.className = 'kv-row';
+    row.innerHTML = `<span class="kv-key">${esc(k)}</span><span class="kv-val">${esc(String(v ?? ''))}</span>`;
+    wrap.appendChild(row);
+  });
+  return wrap;
+}
+
+function headersSection(title, headers) {
+  return kvSection(title, (headers ?? []).map(h => [h.name, h.value]));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ─── HTTP INTRUDE ─────────────────────────────────────────────────────────────
+// ─── INTRUDE — QUEUE ──────────────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function handleInterceptedRequest(msg) {
-  state.intercepted.push(msg);
-  renderQueue(); updateForwardAllBtn();
-  const badge = document.getElementById('intrude-badge');
-  badge.hidden = false; badge.textContent = state.intercepted.length;
-  if (!state.selectedIntercept) selectIntercepted(msg.requestId);
+function addToQueue(req) {
+  state.queue.push(req);
+  renderQueue();
+  // Auto-select first item if nothing selected
+  if (!state.selectedQueueId && state.queue.length === 1) {
+    selectQueueItem(req.requestId);
+  }
+  updateQueueCount();
+  toast(`Intercepted: ${req.method} ${shortenUrl(req.url, 50)}`, 'warning');
 }
 
-function removeFromQueue(requestId) {
-  const idx = state.intercepted.findIndex(r => r.requestId === requestId);
-  if (idx === -1) return;
-  state.intercepted.splice(idx, 1);
-  if (state.selectedIntercept === requestId) state.selectedIntercept = state.intercepted[0]?.requestId || null;
-  renderQueue(); renderEditor(); updateForwardAllBtn(); updateBadge();
-}
-
-function updateBadge() {
-  const badge = document.getElementById('intrude-badge');
-  badge.hidden = state.intercepted.length === 0;
-  badge.textContent = state.intercepted.length;
-}
-
-function selectIntercepted(requestId) {
-  state.selectedIntercept = requestId; renderQueue(); renderEditor();
+function removeFromQueue(requestId, label) {
+  state.queue = state.queue.filter(r => r.requestId !== requestId);
+  if (state.selectedQueueId === requestId) {
+    state.selectedQueueId = state.queue[0]?.requestId ?? null;
+  }
+  renderQueue();
+  renderEditor();
+  updateQueueCount();
+  if (label) toast(`${label}: ${requestId.slice(-8)}`, 'info');
 }
 
 function renderQueue() {
-  const list = document.getElementById('queue-list');
-  document.getElementById('queue-count').textContent = state.intercepted.length;
-  if (state.intercepted.length === 0) { list.innerHTML = '<div class="queue-empty">No requests intercepted</div>'; return; }
-  list.innerHTML = state.intercepted.map(r => {
-    const selected = r.requestId === state.selectedIntercept;
-    const time = new Date(r.timestamp).toLocaleTimeString('en-US', { hour12: false });
-    return `<div class="queue-item ${selected ? 'selected' : ''}" data-rid="${esc(r.requestId)}">
-      <div class="qi-top"><span class="qi-method">${esc(r.method)}</span><span class="qi-url" title="${esc(r.url)}">${esc(urlName(r.url))}</span></div>
-      <div class="qi-meta">${esc(r.resourceType || 'other')} · ${time}</div>
-    </div>`;
-  }).join('');
-  list.querySelectorAll('.queue-item').forEach(el => el.addEventListener('click', () => selectIntercepted(el.dataset.rid)));
+  const body = $('intercept-queue-body');
+  body.innerHTML = '';
+
+  if (state.queue.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'queue-empty';
+    empty.innerHTML = `<div>🟢</div><span>${state.attached ? 'No intercepted requests yet.<br>Traffic will appear here.' : 'Attach to start intercepting.<br>Captured requests appear here.'}</span>`;
+    body.appendChild(empty);
+    return;
+  }
+
+  state.queue.forEach(req => {
+    const item = document.createElement('div');
+    item.className = 'queue-item' + (req.requestId === state.selectedQueueId ? ' selected' : '');
+    item.dataset.id = req.requestId;
+
+    const time = new Date(req.timestamp).toLocaleTimeString('en-US', { hour12: false });
+    const type = (req.resourceType ?? 'unknown').toLowerCase();
+
+    item.innerHTML = `
+      <div class="qi-top">
+        <span class="qi-method">${esc(req.method)}</span>
+        <span class="qi-type">${esc(type)}</span>
+        <span class="qi-time">${time}</span>
+      </div>
+      <div class="qi-url" title="${esc(req.url)}">${esc(shortenUrl(req.url, 55))}</div>
+    `;
+    item.addEventListener('click', () => selectQueueItem(req.requestId));
+    body.appendChild(item);
+  });
 }
+
+function selectQueueItem(requestId) {
+  state.selectedQueueId = requestId;
+  document.querySelectorAll('.queue-item').forEach(el => {
+    el.classList.toggle('selected', el.dataset.id === requestId);
+  });
+  renderEditor();
+}
+
+function updateQueueCount() {
+  $('queue-count').textContent = state.queue.length;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── INTRUDE — EDITOR ─────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
 
 function renderEditor() {
-  const body = document.getElementById('editor-body');
-  const actions = document.getElementById('editor-actions');
-  if (!state.selectedIntercept) { actions.style.display = 'none'; body.innerHTML = '<div class="editor-empty">Select a request from the queue to inspect and modify it</div>'; return; }
-  const req = state.intercepted.find(r => r.requestId === state.selectedIntercept);
-  if (!req) { actions.style.display = 'none'; return; }
-  actions.style.display = 'flex';
-  const headersText = (req.headers || []).map(h => `${h.name}: ${h.value}`).join('\n');
-  body.innerHTML = `
-    <div class="editor-field">
-      <label>Method &amp; URL</label>
-      <div class="editor-url-row">
-        <select id="ed-method" class="method-select">${['GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS'].map(m => `<option ${m===req.method?'selected':''}>${m}</option>`).join('')}</select>
-        <input id="ed-url" type="text" class="url-input" value="${esc(req.url)}" spellcheck="false">
-      </div>
-    </div>
-    <div class="editor-field">
-      <label>Headers <span style="color:var(--text-muted);font-weight:400;text-transform:none;letter-spacing:0">(Name: Value, one per line)</span></label>
-      <textarea id="ed-headers" class="headers-ta" spellcheck="false">${esc(headersText)}</textarea>
-    </div>
-    <div class="editor-field">
-      <label>Body</label>
-      <textarea id="ed-body" class="body-ta" spellcheck="false">${esc(req.postData || '')}</textarea>
-    </div>`;
+  const noReq = $('editor-no-request');
+  const content = $('editor-content');
+
+  const req = state.queue.find(r => r.requestId === state.selectedQueueId);
+
+  if (!req) {
+    noReq.style.display = 'flex';
+    content.style.display = 'none';
+    return;
+  }
+
+  noReq.style.display = 'none';
+  content.style.display = 'flex';
+
+  // Populate fields
+  $('ed-method').textContent = req.method;
+  $('ed-url').textContent = shortenUrl(req.url, 60);
+  $('ed-url-input').value = req.url;
+  $('ed-method-select').value = req.method;
+
+  // Headers → textarea (name: value per line)
+  const headers = req.headers ?? {};
+  $('ed-headers').value = Object.entries(headers)
+    .map(([k, v]) => `${k}: ${v}`)
+    .join('\n');
+
+  // Body
+  const body = req.postData ?? '';
+  $('ed-body').value = body;
+
+  // Body type label
+  const ct = (headers['content-type'] ?? headers['Content-Type'] ?? '').split(';')[0].trim();
+  $('ed-body-type').textContent = ct || 'raw';
 }
 
-function collectEditorModifications() {
-  const url      = document.getElementById('ed-url')?.value     || '';
-  const method   = document.getElementById('ed-method')?.value  || '';
-  const rawHdrs  = document.getElementById('ed-headers')?.value || '';
-  const postData = document.getElementById('ed-body')?.value    || '';
-  const headers  = rawHdrs.split('\n').map(line => { const c = line.indexOf(':'); if (c < 1) return null; return { name: line.slice(0,c).trim(), value: line.slice(c+1).trim() }; }).filter(Boolean);
-  return { url, method, headers, postData };
+// Parse the textarea headers back into an object
+function parseHeadersField() {
+  const raw = $('ed-headers').value.trim();
+  const obj = {};
+  for (const line of raw.split('\n')) {
+    const sep = line.indexOf(':');
+    if (sep === -1) continue;
+    const key = line.slice(0, sep).trim();
+    const val = line.slice(sep + 1).trim();
+    if (key) obj[key] = val;
+  }
+  return obj;
 }
 
-function onInterceptEnabled(options) {
-  state.intrudeEnabled = true;
-  if (options?.disableJs) { state.jsCurrentlyDisabled = true; updateJsStatusBadge(); }
-  syncInterceptToggleUI();
-}
-
-function onInterceptDisabled() {
-  state.intrudeEnabled = false; state.jsCurrentlyDisabled = false;
-  updateJsStatusBadge(); syncInterceptToggleUI();
-  state.intercepted = []; state.selectedIntercept = null;
-  renderQueue(); renderEditor(); updateForwardAllBtn(); updateBadge();
-}
-
-function syncInterceptToggleUI() {
-  const btn = document.getElementById('btn-intercept-toggle');
-  const label = document.getElementById('intercept-label');
-  btn.classList.toggle('active', state.intrudeEnabled);
-  label.textContent = state.intrudeEnabled ? 'Intercepting…' : 'Enable Intercept';
-  document.getElementById('btn-forward-all').disabled = !state.intrudeEnabled || state.intercepted.length === 0;
-  document.getElementById('btn-js-toggle').style.display = (state.intrudeEnabled && state.intrudeMode === 'no-js') ? 'inline-flex' : 'none';
-}
-
-function updateJsStatusBadge() {
-  document.getElementById('js-sep').style.display  = state.jsCurrentlyDisabled ? 'block' : 'none';
-  document.getElementById('js-status').style.display = state.jsCurrentlyDisabled ? 'flex'  : 'none';
-}
-
-function updateJsToggleBtn() {
-  document.getElementById('btn-js-toggle').textContent = state.jsCurrentlyDisabled ? 'Re-enable JS' : 'Disable JS';
-}
-
-function updateForwardAllBtn() {
-  document.getElementById('btn-forward-all').disabled = !state.intrudeEnabled || state.intercepted.length === 0;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// ─── WS INTRUDER — DATA HANDLERS ──────────────────────────────────────────────
-// ═══════════════════════════════════════════════════════════════════════════════
-
-function wsOnCreated(msg) {
-  // Check for duplicate (e.g. reconnect with same requestId)
-  if (state.ws.sockets.find(s => s.requestId === msg.requestId)) return;
-
-  const sock = {
-    requestId: msg.requestId,
-    url:       msg.url,
-    status:    'open',
-    opened:    msg.timestamp,
-    closed:    null,
-    outCount:  0,
-    inCount:   0,
+function buildModifications() {
+  return {
+    url: $('ed-url-input').value.trim(),
+    method: $('ed-method-select').value,
+    headers: parseHeadersField(),
+    postData: $('ed-body').value,
   };
-  state.ws.sockets.push(sock);
-
-  renderSocketList();
-  updateWsSockCount();
-
-  // Auto-select if first socket
-  if (!state.ws.selectedSocketId) wsSelectSocket(msg.requestId);
-}
-
-function wsOnClosed(msg) {
-  const sock = state.ws.sockets.find(s => s.requestId === msg.requestId);
-  if (sock) { sock.status = 'closed'; sock.closed = msg.timestamp; }
-  renderSocketList();
-}
-
-function wsOnFrame(msg, direction) {
-  const sock = state.ws.sockets.find(s => s.requestId === msg.requestId);
-  if (!sock) return;
-
-  const opcode = msg.opcode;
-  let msgType = 'text';
-  if (opcode === 2)  msgType = 'binary';
-  if (opcode === 9)  msgType = 'ping';
-  if (opcode === 10) msgType = 'pong';
-
-  const frame = {
-    id:        String(++state.ws.msgSeq),
-    requestId: msg.requestId,
-    direction,
-    data:      msg.data ?? '',
-    dataType:  msgType,
-    opcode:    msg.opcode,
-    ts:        msg.timestamp,
-    status:    'live',  // 'live' | 'intercepted' | 'forwarded' | 'dropped'
-  };
-
-  state.ws.messages.push(frame);
-  if (direction === 'out') sock.outCount++;
-  else sock.inCount++;
-
-  if (state.ws.selectedSocketId === msg.requestId) {
-    appendMsgItem(frame);
-    updateMsgCounts();
-  }
-}
-
-function wsOnFrameError(msg) {
-  // Just log — no UI action needed
-  console.warn('[DevTools Pro WS] Frame error:', msg);
-}
-
-function wsOnIntercepted(msg) {
-  // Find or create the socket entry for this URL
-  let sock = state.ws.sockets.find(s => s.url === msg.socketUrl && s.status === 'open');
-
-  const frame = {
-    id:        msg.msgId,
-    requestId: sock?.requestId ?? '__intercept__',
-    direction: 'out',
-    data:      msg.data,
-    dataType:  msg.dataType || 'text',
-    opcode:    1,
-    ts:        msg.timestamp,
-    status:    'intercepted',
-    socketUrl: msg.socketUrl,
-  };
-
-  state.ws.messages.push(frame);
-  state.ws.interceptQueue.push(frame);
-  if (sock) { sock.outCount++; }
-
-  // Update badge
-  const badge = document.getElementById('ws-badge');
-  badge.hidden = false;
-  badge.textContent = state.ws.interceptQueue.length;
-
-  if (state.ws.selectedSocketId === frame.requestId || state.ws.intruding) {
-    appendMsgItem(frame);
-    updateMsgCounts();
-  }
-
-  renderWsIntercept();
-
-  // Auto-select first item
-  if (!state.ws.selectedMsgId) wsSelectIntercept(frame.id);
-
-  document.getElementById('ws-btn-fwd-all').disabled = false;
-}
-
-function wsSetMsgStatus(msgId, status) {
-  const frame = state.ws.messages.find(m => m.id === msgId);
-  if (frame) { frame.status = status; }
-
-  // Remove from intercept queue
-  const idx = state.ws.interceptQueue.findIndex(m => m.id === msgId);
-  if (idx !== -1) state.ws.interceptQueue.splice(idx, 1);
-
-  if (state.ws.selectedMsgId === msgId) {
-    state.ws.selectedMsgId = state.ws.interceptQueue[0]?.id ?? null;
-  }
-
-  // Update badge
-  const badge = document.getElementById('ws-badge');
-  badge.hidden = state.ws.interceptQueue.length === 0;
-  badge.textContent = state.ws.interceptQueue.length;
-
-  renderWsIntercept();
-  refreshOutList(); // re-render outgoing to reflect status change
-  updateMsgCounts();
-
-  document.getElementById('ws-btn-fwd-all').disabled = state.ws.interceptQueue.length === 0;
-  document.getElementById('ws-btn-fwd-selected').disabled  = !state.ws.selectedMsgId;
-  document.getElementById('ws-btn-drop-selected').disabled = !state.ws.selectedMsgId;
-}
-
-function releaseAllIntercepted() {
-  // UI cleanup when WS intrude is turned off (bg already released them)
-  state.ws.interceptQueue.forEach(m => { m.status = 'forwarded'; });
-  state.ws.interceptQueue = [];
-  state.ws.selectedMsgId = null;
-  document.getElementById('ws-badge').hidden = true;
-  renderWsIntercept();
-  refreshOutList();
-  updateMsgCounts();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ─── WS INTRUDER — RENDER ─────────────────────────────────────────────────────
+// ─── INTRUDE CONTROLS ─────────────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function renderSocketList() {
-  const list = document.getElementById('ws-socket-list');
+function updateIntrudeUI() {
+  const dot = $('intrude-dot');
+  const label = $('intrude-status-label');
+  const attachB = $('attach-btn');
+  const modesSel = $('mode-selector');
+  const jsTog = $('js-toggle-btn');
 
-  if (state.ws.sockets.length === 0) {
-    list.innerHTML = `<div class="ws-empty-socks"><div class="ws-empty-icon">⚡</div><span>Start monitoring to<br>detect WebSocket connections.</span></div>`;
-    return;
-  }
-
-  list.innerHTML = state.ws.sockets.map(s => {
-    const selected = s.requestId === state.ws.selectedSocketId;
-    const shortUrl = shortWsUrl(s.url);
-    const timeStr  = new Date(s.opened).toLocaleTimeString('en-US', { hour12: false });
-    return `
-      <div class="ws-socket-item ${selected ? 'selected' : ''}" data-rid="${esc(s.requestId)}">
-        <div class="ws-sock-status">
-          <div class="ws-status-dot ${s.status}"></div>
-          <span class="ws-sock-label ${s.status}">${s.status.toUpperCase()}</span>
-        </div>
-        <div class="ws-sock-url" title="${esc(s.url)}">${esc(shortUrl)}</div>
-        <div class="ws-sock-meta">
-          <span>↑${s.outCount}</span>
-          <span>↓${s.inCount}</span>
-          <span>${timeStr}</span>
-        </div>
-      </div>`;
-  }).join('');
-
-  list.querySelectorAll('.ws-socket-item').forEach(el =>
-    el.addEventListener('click', () => wsSelectSocket(el.dataset.rid))
-  );
-}
-
-function wsSelectSocket(requestId) {
-  state.ws.selectedSocketId = requestId;
-
-  // Update socket list highlight
-  document.querySelectorAll('.ws-socket-item').forEach(el =>
-    el.classList.toggle('selected', el.dataset.rid === requestId)
-  );
-
-  const sock = state.ws.sockets.find(s => s.requestId === requestId);
-
-  // Update selected info
-  const info = document.getElementById('ws-selected-info');
-  if (sock) {
-    info.textContent  = sock.url;
-    info.className    = 'ws-selected-info has-socket';
+  if (state.attached) {
+    dot.classList.add('active');
+    label.textContent = `Attached · ${state.intrudeMode === 'no-js' ? 'No JS · No Forward' : 'Yes JS · No Forward'}`;
+    attachB.textContent = '✕ Detach';
+    attachB.classList.add('detach');
+    modesSel.style.opacity = '.4';
+    modesSel.style.pointerEvents = 'none';
+    jsTog.classList.remove('hidden');
+    updateJsToggle();
   } else {
-    info.textContent = 'No socket selected';
-    info.className   = 'ws-selected-info';
+    dot.classList.remove('active');
+    label.textContent = 'Not attached — select a mode and attach.';
+    attachB.textContent = '⚡ Attach';
+    attachB.classList.remove('detach');
+    modesSel.style.opacity = '';
+    modesSel.style.pointerEvents = '';
+    jsTog.classList.add('hidden');
   }
-
-  // Enable/disable message-level controls
-  document.getElementById('ws-btn-clear-msgs').disabled = !requestId;
-  document.getElementById('ws-custom-send-wrap').style.display = (requestId && sock?.status === 'open') ? 'flex' : 'none';
-
-  renderMsgLists();
-  updateMsgCounts();
 }
 
-function renderMsgLists() {
-  refreshOutList();
-  refreshInList();
-}
-
-function refreshOutList() {
-  const list = document.getElementById('ws-out-list');
-  const msgs = state.ws.messages.filter(m =>
-    m.requestId === state.ws.selectedSocketId && m.direction === 'out'
-  );
-  if (msgs.length === 0) {
-    list.innerHTML = '<div class="ws-empty-msgs">No outgoing frames yet.</div>';
-    return;
-  }
-  list.innerHTML = msgs.map(m => renderMsgItem(m)).join('');
-  list.querySelectorAll('.ws-msg-fwd').forEach(btn =>
-    btn.addEventListener('click', (e) => { e.stopPropagation(); wsForwardMsg(btn.dataset.id); })
-  );
-  list.querySelectorAll('.ws-msg-drp').forEach(btn =>
-    btn.addEventListener('click', (e) => { e.stopPropagation(); wsDropMsg(btn.dataset.id); })
-  );
-}
-
-function refreshInList() {
-  const list = document.getElementById('ws-in-list');
-  const msgs = state.ws.messages.filter(m =>
-    m.requestId === state.ws.selectedSocketId && m.direction === 'in'
-  );
-  if (msgs.length === 0) {
-    list.innerHTML = '<div class="ws-empty-msgs">No incoming frames yet.</div>';
-    return;
-  }
-  list.innerHTML = msgs.map(m => renderMsgItem(m)).join('');
-}
-
-function appendMsgItem(frame) {
-  if (frame.requestId !== state.ws.selectedSocketId) return;
-  const listId = frame.direction === 'out' ? 'ws-out-list' : 'ws-in-list';
-  const list   = document.getElementById(listId);
-
-  // Remove empty placeholder
-  const empty = list.querySelector('.ws-empty-msgs');
-  if (empty) empty.remove();
-
-  const div = document.createElement('div');
-  div.innerHTML = renderMsgItem(frame);
-  const el = div.firstElementChild;
-  list.appendChild(el);
-
-  // Wire intercept buttons
-  el.querySelector('.ws-msg-fwd')?.addEventListener('click', (e) => { e.stopPropagation(); wsForwardMsg(frame.id); });
-  el.querySelector('.ws-msg-drp')?.addEventListener('click', (e) => { e.stopPropagation(); wsDropMsg(frame.id); });
-
-  // Auto-scroll
-  list.scrollTop = list.scrollHeight;
-}
-
-function renderMsgItem(frame) {
-  const time  = new Date(frame.ts).toLocaleTimeString('en-US', { hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit' });
-  const preview = (frame.data || '').slice(0, 200);
-  const statusMap = { live:'', intercepted:'pending', forwarded:'forwarded', dropped:'dropped' };
-  const statusLabel = statusMap[frame.status] || '';
-
-  const intercepted = frame.status === 'intercepted';
-  const dropped     = frame.status === 'dropped';
-  const forwarded   = frame.status === 'forwarded';
-
-  const classNames = ['ws-msg-item', intercepted ? 'intercepted' : '', dropped ? 'dropped' : '', forwarded ? 'forwarded' : ''].filter(Boolean).join(' ');
-
-  const actionBtns = intercepted ? `
-    <div class="ws-msg-actions">
-      <button class="ed-btn forward-btn ws-msg-fwd" data-id="${esc(frame.id)}">Forward</button>
-      <button class="ed-btn drop-btn ws-msg-drp"    data-id="${esc(frame.id)}">Drop</button>
-    </div>` : '';
-
-  return `
-    <div class="${classNames}" data-id="${esc(frame.id)}">
-      <div class="ws-msg-top">
-        <span class="ws-msg-time">${time}</span>
-        <span class="ws-msg-type-badge ${frame.dataType}">${frame.dataType}</span>
-        ${statusLabel ? `<span class="ws-msg-status ${statusLabel}">${statusLabel}</span>` : ''}
-      </div>
-      <div class="ws-msg-body">${esc(preview)}${frame.data?.length > 200 ? '…' : ''}</div>
-      ${actionBtns}
-    </div>`;
-}
-
-function updateMsgCounts() {
-  const socketId = state.ws.selectedSocketId;
-  const out = state.ws.messages.filter(m => m.requestId === socketId && m.direction === 'out').length;
-  const inc = state.ws.messages.filter(m => m.requestId === socketId && m.direction === 'in').length;
-  document.getElementById('ws-out-count').textContent = out;
-  document.getElementById('ws-in-count').textContent  = inc;
-}
-
-function updateWsSockCount() {
-  document.getElementById('ws-sock-count').textContent = state.ws.sockets.length;
-}
-
-// ─── Intercept Drawer ─────────────────────────────────────────────────────────
-
-function showWsDrawer(visible) {
-  document.getElementById('ws-intercept-drawer').classList.toggle('visible', visible);
-}
-
-function renderWsIntercept() {
-  const queue = state.ws.interceptQueue;
-  document.getElementById('ws-intercept-count').textContent = queue.length;
-
-  const queueEl = document.getElementById('ws-intercept-queue');
-
-  if (queue.length === 0) {
-    queueEl.innerHTML = '<div class="queue-empty">Waiting for intercepted frames…</div>';
-    renderWsFrameEditor(null);
-    return;
-  }
-
-  queueEl.innerHTML = queue.map(m => {
-    const selected = m.id === state.ws.selectedMsgId;
-    const time = new Date(m.ts).toLocaleTimeString('en-US', { hour12:false });
-    const preview = (m.data || '').slice(0, 60);
-    return `<div class="ws-intercept-item ${selected ? 'selected' : ''}" data-id="${esc(m.id)}">
-      <div class="qi-top">
-        <span class="qi-method">${esc(m.dataType.toUpperCase())}</span>
-        <span class="qi-url" title="${esc(m.socketUrl || '')}">${esc(shortWsUrl(m.socketUrl || ''))}</span>
-      </div>
-      <div class="qi-meta">${esc(time)} · ${esc(preview)}${m.data?.length > 60 ? '…' : ''}</div>
-    </div>`;
-  }).join('');
-
-  queueEl.querySelectorAll('.ws-intercept-item').forEach(el =>
-    el.addEventListener('click', () => wsSelectIntercept(el.dataset.id))
-  );
-
-  renderWsFrameEditor(state.ws.selectedMsgId);
-
-  document.getElementById('ws-btn-fwd-selected').disabled  = !state.ws.selectedMsgId;
-  document.getElementById('ws-btn-drop-selected').disabled = !state.ws.selectedMsgId;
-}
-
-function wsSelectIntercept(id) {
-  state.ws.selectedMsgId = id;
-  document.querySelectorAll('.ws-intercept-item').forEach(el => el.classList.toggle('selected', el.dataset.id === id));
-  renderWsFrameEditor(id);
-  document.getElementById('ws-btn-fwd-selected').disabled  = !id;
-  document.getElementById('ws-btn-drop-selected').disabled = !id;
-}
-
-function renderWsFrameEditor(msgId) {
-  const editor = document.getElementById('ws-frame-editor');
-
-  if (!msgId) {
-    editor.innerHTML = '<div class="ws-editor-empty">Select an intercepted frame to edit it</div>';
-    return;
-  }
-
-  const frame = state.ws.interceptQueue.find(m => m.id === msgId);
-  if (!frame) { editor.innerHTML = '<div class="ws-editor-empty">Frame not found</div>'; return; }
-
-  editor.innerHTML = `
-    <div class="ws-frame-edit-area">
-      <div class="ws-frame-meta">Socket: ${esc(shortWsUrl(frame.socketUrl || ''))} · Type: ${esc(frame.dataType)}</div>
-      <div class="ws-frame-edit-label">Frame Payload</div>
-      <textarea class="ws-frame-textarea" id="ws-frame-payload" spellcheck="false">${esc(frame.data || '')}</textarea>
-    </div>`;
-}
-
-// ─── WS Actions ───────────────────────────────────────────────────────────────
-
-function wsForwardMsg(msgId) {
-  // Read edited payload from textarea if in drawer
-  const ta = document.getElementById('ws-frame-payload');
-  const editedData = ta ? ta.value : null;
-
-  // If edited, update in-memory
-  if (editedData !== null) {
-    const frame = state.ws.interceptQueue.find(m => m.id === msgId);
-    if (frame) frame.data = editedData;
-  }
-
-  port.postMessage({ type: 'WS_FORWARD', msgId: String(msgId) });
-}
-
-function wsDropMsg(msgId) {
-  port.postMessage({ type: 'WS_DROP', msgId: String(msgId) });
-}
-
-// ─── WS Controls UI ───────────────────────────────────────────────────────────
-
-function updateWsControlsUI() {
-  const monBtn   = document.getElementById('ws-monitor-btn');
-  const monDot   = document.getElementById('ws-monitor-dot');
-  const monLabel = document.getElementById('ws-monitor-label');
-  const intBtn   = document.getElementById('ws-intrude-btn');
-  const intDot   = document.getElementById('ws-intrude-dot');
-  const intLabel = document.getElementById('ws-intrude-label');
-
-  if (state.ws.monitoring) {
-    monBtn.classList.add('monitoring');
-    monDot.className = 'ws-dot ws-dot-monitor';
-    monLabel.textContent = 'Stop Monitor';
-    intBtn.disabled = false;
-  } else {
-    monBtn.classList.remove('monitoring');
-    monDot.className = 'ws-dot';
-    monLabel.textContent = 'Start Monitor';
-    intBtn.disabled = true;
-  }
-
-  if (state.ws.intruding) {
-    intBtn.classList.add('intruding');
-    intDot.className = 'ws-dot ws-dot-intrude';
-    intLabel.textContent = 'Intercept ON';
-  } else {
-    intBtn.classList.remove('intruding');
-    intDot.className = 'ws-dot';
-    intLabel.textContent = 'Intercept Off';
-  }
-
-  document.getElementById('ws-btn-clear-all').disabled = state.ws.sockets.length === 0;
+function updateJsToggle() {
+  const btn = $('js-toggle-btn');
+  btn.textContent = `JS: ${state.jsEnabled ? 'ON' : 'OFF'}`;
+  btn.className = `js-toggle ${state.jsEnabled ? 'js-on' : 'js-off'}`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ─── SPLIT PANE DRAG ──────────────────────────────────────────────────────────
+// ─── WS INTRUDE CONTROLS ──────────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function makeSplitDraggable(handleId, rightPaneEl, axis = 'x', shrink = true) {
-  const handle = document.getElementById(handleId);
-  if (!handle) return;
-  let dragging = false, startPos = 0, startSize = 0;
-  handle.addEventListener('mousedown', (e) => {
-    dragging = true; startPos = axis === 'x' ? e.clientX : e.clientY;
-    startSize = axis === 'x' ? rightPaneEl.offsetWidth : rightPaneEl.offsetHeight;
-    handle.classList.add('dragging'); document.body.style.cursor = axis === 'x' ? 'col-resize' : 'row-resize';
-    document.body.style.userSelect = 'none'; e.preventDefault();
+function updateWsUI() {
+  const attachB = $('ws-attach-btn');
+  const label = $('ws-status-label');
+  if (state.wsAttached) {
+    attachB.textContent = '✕ Detach WS';
+    attachB.style.background = 'var(--bg-3)';
+    label.textContent = 'Attached. Intercepting WebSockets...';
+    label.style.color = 'var(--text-0)';
+  } else {
+    attachB.textContent = '⚡ Attach WS';
+    attachB.style.background = 'var(--accent)';
+    label.textContent = 'Not attached.';
+    label.style.color = 'var(--text-2)';
+  }
+}
+
+function addToWsQueue(msg) {
+  state.wsMessages.push(msg);
+  if (!state.wsSelectedMessageId) {
+    state.wsSelectedMessageId = msg.messageId;
+  }
+  renderWsQueue();
+  renderWsEditor();
+}
+
+function removeFromWsQueue(messageId, status) {
+  const idx = state.wsMessages.findIndex(m => m.id === messageId || m.messageId === messageId);
+  if (idx !== -1) {
+    state.wsMessages[idx].status = status;
+    // Just mark it, or remove it entirely depending on preference. Let's remove if forwarded/dropped.
+    state.wsMessages.splice(idx, 1);
+  }
+  if (state.wsSelectedMessageId === messageId) {
+    state.wsSelectedMessageId = state.wsMessages.length > 0 ? state.wsMessages[0].messageId || state.wsMessages[0].id : null;
+  }
+  renderWsQueue();
+  renderWsEditor();
+}
+
+function renderWsQueue() {
+  const body = $('ws-message-list-body');
+  if (state.wsMessages.length === 0) {
+    body.innerHTML = '';
+    body.appendChild(createEmpty('🔌', 'Waiting for WebSocket messages…'));
+    return;
+  }
+
+  body.innerHTML = '';
+  state.wsMessages.forEach(msg => {
+    const el = document.createElement('div');
+    const msgId = msg.messageId || msg.id;
+    el.className = `list-row ${state.wsSelectedMessageId === msgId ? 'selected' : ''}`;
+    el.style.display = 'flex';
+    el.style.padding = '4px 8px';
+    el.style.cursor = 'pointer';
+    el.style.borderBottom = '1px solid var(--border)';
+
+    // Direction indicator
+    const dir = msg.direction === 'sent' ? '↑' : (msg.direction === 'recv' ? '↓' : '•');
+    const color = msg.direction === 'sent' ? '#5bdba6' : (msg.direction === 'recv' ? '#ff9a9a' : 'var(--text-1)');
+
+    // Excerpt
+    const text = msg.payload || '';
+    const excerpt = text.substring(0, 50) + (text.length > 50 ? '...' : '');
+
+    // Time
+    const time = new Date(msg.timestamp || Date.now()).toLocaleTimeString();
+
+    el.innerHTML = `
+      <span style="flex:1;color:${color}">${dir}</span>
+      <span style="flex:3;text-overflow:ellipsis;white-space:nowrap;overflow:hidden;font-family:var(--font-mono);">${escapeHtml(excerpt)}</span>
+      <span style="flex:1;text-align:right;color:var(--text-2);">${time}</span>
+    `;
+
+    el.addEventListener('click', () => {
+      state.wsSelectedMessageId = msgId;
+      renderWsQueue();
+      renderWsEditor();
+    });
+
+    body.appendChild(el);
   });
+}
+
+function renderWsEditor() {
+  const msg = state.wsMessages.find(m => (m.messageId || m.id) === state.wsSelectedMessageId);
+  const noMsgPane = $('ws-no-message');
+  const detailsPane = $('ws-message-details');
+
+  if (!msg) {
+    noMsgPane.style.display = 'flex';
+    detailsPane.style.display = 'none';
+    return;
+  }
+
+  noMsgPane.style.display = 'none';
+  detailsPane.style.display = 'flex';
+
+  const dirSpan = $('ws-detail-dir');
+  if (msg.direction === 'sent') {
+    dirSpan.textContent = '↑ SENT';
+    dirSpan.style.color = '#5bdba6';
+  } else if (msg.direction === 'recv') {
+    dirSpan.textContent = '↓ RECV';
+    dirSpan.style.color = '#ff9a9a';
+  } else {
+    dirSpan.textContent = '• INFO';
+    dirSpan.style.color = 'var(--text-1)';
+  }
+
+  $('ws-detail-time').textContent = new Date(msg.timestamp || Date.now()).toLocaleTimeString();
+  $('ws-detail-payload').value = msg.payload || '';
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── STATUS BAR ───────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function updateStatusBar() {
+  const visible = filteredRequests();
+  const totalSize = visible.reduce((s, r) => s + (r.size > 0 ? r.size : 0), 0);
+  const totalTime = visible.reduce((s, r) => s + (r.time > 0 ? r.time : 0), 0);
+
+  $('sb-count').textContent = `${visible.length} request${visible.length !== 1 ? 's' : ''}`;
+  $('sb-size').textContent = formatBytes(totalSize);
+  $('sb-time').textContent = formatTime(totalTime);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── RESIZE HANDLE ────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function initResizeHandle() {
+  const handle = $('net-resize');
+  const detail = $('request-detail-pane');
+  let dragging = false;
+  let startX, startW;
+
+  handle.addEventListener('mousedown', (e) => {
+    dragging = true;
+    startX = e.clientX;
+    startW = detail.offsetWidth;
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+  });
+
   document.addEventListener('mousemove', (e) => {
     if (!dragging) return;
-    const delta = (axis === 'x' ? e.clientX : e.clientY) - startPos;
-    const sign  = shrink ? -1 : 1;
-    const newSize = Math.max(180, Math.min(startSize + delta * sign, 900));
-    if (axis === 'x') rightPaneEl.style.width = newSize + 'px';
-    else rightPaneEl.style.height = newSize + 'px';
+    const dx = startX - e.clientX;
+    const newW = Math.min(Math.max(startW + dx, 200), window.innerWidth * 0.7);
+    detail.style.width = newW + 'px';
   });
+
   document.addEventListener('mouseup', () => {
     if (!dragging) return;
-    dragging = false; handle.classList.remove('dragging');
-    document.body.style.cursor = ''; document.body.style.userSelect = '';
+    dragging = false;
+    document.body.style.userSelect = '';
+    document.body.style.cursor = '';
   });
 }
 
-makeSplitDraggable('split-handle', document.getElementById('detail-pane'), 'x', true);
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── TOASTS ───────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
 
-// Intrude queue/editor split
-(function() {
-  const handle = document.getElementById('intrude-split-handle');
-  const qPanel = document.querySelector('.queue-panel');
-  if (!handle || !qPanel) return;
-  let drag = false, startX = 0, startW = 0;
-  handle.addEventListener('mousedown', e => { drag = true; startX = e.clientX; startW = qPanel.offsetWidth; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none'; e.preventDefault(); });
-  document.addEventListener('mousemove', e => { if (!drag) return; qPanel.style.width = Math.max(160, Math.min(startW + (e.clientX - startX), 600)) + 'px'; });
-  document.addEventListener('mouseup', () => { drag = false; document.body.style.cursor = ''; document.body.style.userSelect = ''; });
-})();
-
-// WS socket list resize
-makeSplitDraggable('ws-split-handle-1', document.getElementById('ws-socket-panel'), 'x', false);
+function toast(msg, type = 'info', duration = 3000) {
+  const container = $('toast-container');
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.textContent = msg;
+  container.appendChild(el);
+  setTimeout(() => el.remove(), duration);
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ─── EVENT WIRING ─────────────────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// ── Tab switching ─────────────────────────────────────────────────────────────
-document.querySelectorAll('.tab-btn').forEach(btn =>
-  btn.addEventListener('click', () => {
-    const tab = btn.dataset.tab;
-    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    document.querySelectorAll('.tab-content').forEach(el => el.classList.toggle('active', el.id === `tab-${tab}`));
-  })
-);
+function wireEvents() {
 
-// ── Network controls ──────────────────────────────────────────────────────────
-document.getElementById('btn-record').addEventListener('click', () => {
-  state.recording = !state.recording;
-  document.getElementById('btn-record').classList.toggle('active', state.recording);
-});
+  // ── Tab switching ──────────────────────────────────────────
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const tab = btn.dataset.tab;
+      state.activeTab = tab;
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+      document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.dataset.panel === tab));
+      $('net-controls').style.display = tab === 'network' ? 'flex' : 'none';
+    });
+  });
 
-document.getElementById('btn-clear').addEventListener('click', () => {
-  state.requests = []; state.selectedReqId = null; state.logEpoch = null; reqIdCounter = 0;
-  clearTableBody(); hideDetail(); updateStatusBar(); showEmptyState(true);
-});
+  // ── Network controls ───────────────────────────────────────
+  $('btn-record').addEventListener('click', () => {
+    state.recording = !state.recording;
+    $('btn-record').textContent = state.recording ? '⏸ Pause' : '▶ Record';
+    toast(state.recording ? 'Recording resumed.' : 'Recording paused.', 'info');
+  });
 
-document.getElementById('chk-preserve').addEventListener('change', e => { state.preserveLog = e.target.checked; });
-document.getElementById('filter-search').addEventListener('input', e => { state.filterText = e.target.value.trim(); reRenderTable(); updateStatusBar(); });
+  // ── WS Controls ────────────────────────────────────────────
+  $('ws-attach-btn').addEventListener('click', () => {
+    if (state.wsAttached) {
+      sendBg({ type: 'ws:detach' });
+    } else {
+      sendBg({ type: 'ws:attach' });
+    }
+  });
 
-document.getElementById('type-filters').addEventListener('click', e => {
-  const btn = e.target.closest('.type-btn');
-  if (!btn) return;
-  document.querySelectorAll('.type-btn').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
-  state.filterType = btn.dataset.type;
-  reRenderTable(); updateStatusBar();
-});
+  $('ws-clear-btn').addEventListener('click', () => {
+    state.wsMessages = [];
+    state.wsSelectedMessageId = null;
+    $('ws-message-list-body').innerHTML = '';
+    $('ws-message-list-body').appendChild(createEmpty('🔌', 'Waiting for WebSocket messages…'));
+    $('ws-message-details').style.display = 'none';
+    $('ws-no-message').style.display = 'block';
+  });
 
-document.getElementById('detail-tabs').addEventListener('click', e => {
-  const btn = e.target.closest('.detail-tab');
-  if (btn) renderDetailTab(btn.dataset.dtab);
-});
+  document.querySelectorAll('.detail-tab[data-wstab]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.detail-tab[data-wstab]').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const tab = btn.dataset.wstab;
+      $('ws-view-tab').style.display = tab === 'view' ? 'flex' : 'none';
+      $('ws-create-tab').style.display = tab === 'create' ? 'flex' : 'none';
+    });
+  });
 
-document.getElementById('btn-close-detail').addEventListener('click', hideDetail);
+  $('ws-btn-send-edited').addEventListener('click', () => {
+    if (!state.wsSelectedMessageId) return;
+    const msg = state.wsMessages.find(m => (m.messageId || m.id) === state.wsSelectedMessageId);
+    if (!msg) return;
+    const newPayload = $('ws-detail-payload').value;
+    const targetMessageId = msg.messageId || msg.id;
+    sendBg({
+      type: 'ws:forward',
+      messageId: targetMessageId,
+      payload: newPayload,
+      direction: msg.direction
+    });
+  });
 
-// ── HTTP Intrude controls ─────────────────────────────────────────────────────
-document.getElementById('mode-no-js').addEventListener('click', () => {
-  if (state.intrudeEnabled) return;
-  state.intrudeMode = 'no-js';
-  document.getElementById('mode-no-js').classList.add('active');
-  document.getElementById('mode-yes-js').classList.remove('active');
-});
-document.getElementById('mode-yes-js').addEventListener('click', () => {
-  if (state.intrudeEnabled) return;
-  state.intrudeMode = 'yes-js';
-  document.getElementById('mode-yes-js').classList.add('active');
-  document.getElementById('mode-no-js').classList.remove('active');
-});
+  $('ws-btn-drop').addEventListener('click', () => {
+    if (!state.wsSelectedMessageId) return;
+    sendBg({ type: 'ws:drop', messageId: state.wsSelectedMessageId });
+    removeFromWsQueue(state.wsSelectedMessageId, 'Dropped');
+  });
 
-document.getElementById('btn-intercept-toggle').addEventListener('click', () => {
-  if (state.intrudeEnabled) {
-    port.postMessage({ type: 'DISABLE_INTERCEPT' });
-  } else {
-    port.postMessage({ type: 'ENABLE_INTERCEPT', options: { disableJs: state.intrudeMode === 'no-js' } });
-  }
-});
+  $('ws-btn-send-new').addEventListener('click', () => {
+    const payload = $('ws-new-payload').value;
+    if (!payload.trim()) return;
+    sendBg({ type: 'ws:create', payload });
+  });
 
-document.getElementById('btn-js-toggle').addEventListener('click',  () => port.postMessage({ type: 'TOGGLE_JS' }));
-document.getElementById('btn-forward').addEventListener('click',     () => {
-  if (!state.selectedIntercept) return;
-  port.postMessage({ type: 'CONTINUE_REQUEST', requestId: state.selectedIntercept, modifications: collectEditorModifications() });
-});
-document.getElementById('btn-drop').addEventListener('click',        () => {
-  if (!state.selectedIntercept) return;
-  port.postMessage({ type: 'DROP_REQUEST', requestId: state.selectedIntercept });
-});
-document.getElementById('btn-forward-all').addEventListener('click', () => port.postMessage({ type: 'FORWARD_ALL' }));
+  $('btn-clear').addEventListener('click', () => {
+    state.requests = [];
+    state.selectedRequest = null;
+    $('request-list-body').innerHTML = '';
+    $('request-list-body').appendChild(createEmpty('📡', 'Listening for network requests…\nReload the page to capture traffic.'));
+    $('request-detail-pane').classList.add('hidden');
+    updateStatusBar();
+  });
 
-// ── WS Intruder controls ──────────────────────────────────────────────────────
-document.getElementById('ws-monitor-btn').addEventListener('click', () => {
-  if (!state.ws.monitoring) {
-    port.postMessage({ type: 'WS_MONITOR_START' });
-  } else {
-    // Stop: also stop intrude if active
-    if (state.ws.intruding) port.postMessage({ type: 'WS_INTRUDE_DISABLE' });
-    port.postMessage({ type: 'WS_MONITOR_STOP' });
-  }
-});
+  $('filter-input').addEventListener('input', (e) => {
+    state.urlFilter = e.target.value;
+    rebuildTable();
+  });
 
-document.getElementById('ws-intrude-btn').addEventListener('click', () => {
-  if (!state.ws.monitoring) return;
-  if (!state.ws.intruding) {
-    port.postMessage({ type: 'WS_INTRUDE_ENABLE' });
-  } else {
-    port.postMessage({ type: 'WS_INTRUDE_DISABLE' });
-  }
-});
+  $('method-filter').addEventListener('change', (e) => {
+    state.methodFilter = e.target.value;
+    rebuildTable();
+  });
 
-document.getElementById('ws-btn-clear-msgs').addEventListener('click', () => {
-  state.ws.messages = state.ws.messages.filter(m => m.requestId !== state.ws.selectedSocketId);
-  const sock = state.ws.sockets.find(s => s.requestId === state.ws.selectedSocketId);
-  if (sock) { sock.outCount = 0; sock.inCount = 0; }
-  renderMsgLists(); updateMsgCounts();
-});
+  // ── Detail tab switching ───────────────────────────────────
+  document.querySelectorAll('.detail-tab[data-dtab]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      state.activeDetailTab = btn.dataset.dtab;
+      document.querySelectorAll('.detail-tab[data-dtab]').forEach(b => b.classList.toggle('active', b === btn));
+      renderDetailTab(state.activeDetailTab);
+    });
+  });
 
-document.getElementById('ws-btn-clear-all').addEventListener('click', () => {
-  state.ws.sockets  = [];
-  state.ws.messages = [];
-  state.ws.interceptQueue  = [];
-  state.ws.selectedSocketId = null;
-  state.ws.selectedMsgId   = null;
-  renderSocketList(); renderMsgLists(); updateWsSockCount(); updateMsgCounts();
-  updateWsControlsUI();
-  document.getElementById('ws-selected-info').textContent = 'No socket selected';
-  document.getElementById('ws-selected-info').className   = 'ws-selected-info';
-});
+  // ── Intrude: Mode selection ────────────────────────────────
+  document.querySelectorAll('.mode-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b === btn));
+      state.intrudeMode = btn.dataset.mode;
+    });
+  });
 
-document.getElementById('ws-custom-send-btn').addEventListener('click', () => {
-  const input = document.getElementById('ws-custom-input');
-  const data  = input.value.trim();
-  if (!data || !state.ws.selectedSocketId) return;
-  const sock = state.ws.sockets.find(s => s.requestId === state.ws.selectedSocketId);
-  if (!sock) return;
-  port.postMessage({ type: 'WS_SEND_CUSTOM', socketUrl: sock.url, data });
-  input.value = '';
-});
+  // ── Intrude: Attach / Detach ───────────────────────────────
+  $('attach-btn').addEventListener('click', () => {
+    if (!state.attached) {
+      sendBg({ type: 'intrude:attach', mode: state.intrudeMode });
+    } else {
+      sendBg({ type: 'intrude:detach' });
+    }
+  });
 
-document.getElementById('ws-custom-input').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); document.getElementById('ws-custom-send-btn').click(); }
-});
+  // ── Intrude: JS Toggle ─────────────────────────────────────
+  $('js-toggle-btn').addEventListener('click', () => {
+    if (state.jsEnabled) {
+      sendBg({ type: 'js:disable' });
+    } else {
+      sendBg({ type: 'js:enable' });
+    }
+  });
 
-// Drawer: forward/drop selected
-document.getElementById('ws-btn-fwd-selected').addEventListener('click', () => {
-  if (state.ws.selectedMsgId) wsForwardMsg(state.ws.selectedMsgId);
-});
-document.getElementById('ws-btn-drop-selected').addEventListener('click', () => {
-  if (state.ws.selectedMsgId) wsDropMsg(state.ws.selectedMsgId);
-});
+  // ── Intrude: Forward ──────────────────────────────────────
+  $('btn-forward').addEventListener('click', () => {
+    const reqId = state.selectedQueueId;
+    if (!reqId) return;
+    const mods = buildModifications();
+    sendBg({ type: 'intrude:forward', requestId: reqId, modifications: mods });
+  });
 
-// Drawer: forward all
-document.getElementById('ws-btn-fwd-all').addEventListener('click', () => {
-  const ids = state.ws.interceptQueue.map(m => m.id);
-  ids.forEach(id => port.postMessage({ type: 'WS_FORWARD', msgId: String(id) }));
-});
+  // ── Intrude: Drop ─────────────────────────────────────────
+  $('btn-drop').addEventListener('click', () => {
+    const reqId = state.selectedQueueId;
+    if (!reqId) return;
+    sendBg({ type: 'intrude:drop', requestId: reqId });
+  });
+
+  // ── Keyboard shortcuts ─────────────────────────────────────
+  document.addEventListener('keydown', (e) => {
+    // Ctrl/Cmd + F → focus filter
+    if ((e.ctrlKey || e.metaKey) && e.key === 'f' && state.activeTab === 'network') {
+      e.preventDefault();
+      $('filter-input').focus();
+    }
+    // Ctrl/Cmd + L → clear network
+    if ((e.ctrlKey || e.metaKey) && e.key === 'l' && state.activeTab === 'network') {
+      e.preventDefault();
+      $('btn-clear').click();
+    }
+    // F (forward) when in intrude and an item is selected
+    if (e.key === 'f' && state.activeTab === 'intrude' && state.selectedQueueId) {
+      if (!['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) {
+        $('btn-forward').click();
+      }
+    }
+    // D (drop) when in intrude
+    if (e.key === 'd' && state.activeTab === 'intrude' && state.selectedQueueId) {
+      if (!['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) {
+        $('btn-drop').click();
+      }
+    }
+  });
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════════
 
+function $(id) { return document.getElementById(id); }
+
 function esc(str) {
-  return String(str ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
-function tryPrettyJson(text) {
-  try { return JSON.stringify(JSON.parse(text), null, 2); } catch { return text; }
+function generateId() {
+  return Math.random().toString(36).slice(2, 11) + Date.now().toString(36);
 }
 
-function shortWsUrl(url) {
+function shortenUrl(url, maxLen = 80) {
   try {
     const u = new URL(url);
     const path = u.pathname + u.search;
-    const label = u.host + (path.length > 1 ? path : '');
-    return label.length > 50 ? label.slice(0, 49) + '…' : label;
-  } catch { return url.slice(0, 50); }
+    const full = u.host + path;
+    if (full.length <= maxLen) return full;
+    return full.slice(0, maxLen - 1) + '…';
+  } catch {
+    return url.length > maxLen ? url.slice(0, maxLen - 1) + '…' : url;
+  }
 }
 
-// ─── Init ─────────────────────────────────────────────────────────────────────
-showEmptyState(true);
-renderQueue();
-updateWsControlsUI();
+function statusBadge(code) {
+  const cls = code >= 500 ? 'status-5xx'
+    : code >= 400 ? 'status-4xx'
+      : code >= 300 ? 'status-3xx'
+        : code >= 200 ? 'status-2xx'
+          : 'status-0xx';
+  return `<span class="status-badge ${cls}">${code || '—'}</span>`;
+}
+
+function mimeToType(mime) {
+  if (!mime) return 'other';
+  if (mime.includes('javascript')) return 'script';
+  if (mime.includes('json')) return 'json';
+  if (mime.includes('html')) return 'html';
+  if (mime.includes('css')) return 'css';
+  if (mime.includes('image')) return 'img';
+  if (mime.includes('font')) return 'font';
+  if (mime.includes('xml')) return 'xml';
+  if (mime.includes('websocket')) return 'ws';
+  if (mime.includes('plain')) return 'text';
+  return mime.split('/').pop().split(';')[0];
+}
+
+function formatBytes(b) {
+  if (!b || b <= 0) return '0 B';
+  const k = 1024;
+  const units = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(b) / Math.log(k));
+  return (b / Math.pow(k, i)).toFixed(i === 0 ? 0 : 1) + ' ' + units[i];
+}
+
+function formatTime(ms) {
+  if (!ms || ms < 0) return '0 ms';
+  if (ms < 1000) return Math.round(ms) + ' ms';
+  return (ms / 1000).toFixed(2) + ' s';
+}
+
+function tryPrettyJson(str) {
+  try {
+    return JSON.stringify(JSON.parse(str), null, 2);
+  } catch {
+    return str;
+  }
+}
+
+function escapeHtml(unsafe) {
+  if (!unsafe) return '';
+  return unsafe
+    .toString()
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function createEmpty(icon, text) {
+  const div = document.createElement('div');
+  div.className = 'empty-state';
+  div.id = 'net-empty';
+  div.innerHTML = `<span class="icon">${icon}</span><p>${text.replace(/\n/g, '<br>')}</p>`;
+  return div;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── INIT ─────────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+
+(function init() {
+  connectBackground();
+  wireEvents();
+  initResizeHandle();
+  updateIntrudeUI();
+  updateWsUI();
+  renderWsQueue();
+  updateQueueCount();
+  updateStatusBar();
+})();

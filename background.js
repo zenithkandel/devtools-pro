@@ -1,467 +1,512 @@
 /**
- * background.js — DevTools Pro Service Worker
+ * background.js - DevTools Pro Service Worker
  *
- * Features:
- *  1. HTTP Intrude  — Fetch domain hold/modify/release (Burp-style)
- *  2. WS Monitor   — Network domain WebSocket frame events
- *  3. WS Intrude   — Runtime.addBinding + WebSocket.prototype.send patch
- *
- * Debugger is shared: one attachment per tab, multiple features reuse it.
+ * Responsibilities:
+ *  - Manage chrome.debugger lifecycle
+ *  - Intercept HTTP requests for intrude mode (Fetch domain)
+ *  - Monitor WebSocket lifecycle and frames (Network domain)
+ *  - Relay events between CDP and panel.js
  */
 
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// ─── SHARED STATE ─────────────────────────────────────────────────────────────
-// ═══════════════════════════════════════════════════════════════════════════════
+// Maps tabId -> MessagePort
+const panelPorts = new Map();
 
-/** tabId → chrome.runtime.Port */
-const connections = new Map();
+// Maps tabId -> intrude mode: 'no-js' | 'yes-js'
+const intrudeTabs = new Map();
 
-/**
- * tabId → {
- *   fetchEnabled    : boolean,
- *   noJsEnabled     : boolean,
- *   networkEnabled  : boolean,
- *   wsIntruding     : boolean,
- *   wsScriptId      : string|null,
- * }
- */
-const debuggerState = new Map();
+// Tabs where WS monitor is active
+const wsTabs = new Set();
 
-/** HTTP intercept: requestId → { tabId } */
-const interceptedRequests = new Map();
+// Maps requestId -> { tabId, ...CDPParams }
+const pendingRequests = new Map();
 
-/** Runtime binding name used by the WS intercept patch */
-const WS_BINDING = '__dtpWsMsg__';
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// ─── PORT / MESSAGING ─────────────────────────────────────────────────────────
-// ═══════════════════════════════════════════════════════════════════════════════
+// Maps tabId -> Map(wsRequestId -> url)
+const wsConnectionsByTab = new Map();
 
 chrome.runtime.onConnect.addListener((port) => {
-  if (port.name !== 'devtools-pro') return;
+    const match = port.name.match(/^panel_(\d+)$/);
+    if (!match) return;
 
-  let connectedTabId = null;
+    const tabId = parseInt(match[1], 10);
+    panelPorts.set(tabId, port);
 
-  port.onMessage.addListener(async (msg) => {
-    try {
-      switch (msg.type) {
+    port.onMessage.addListener((msg) => {
+        handlePanelMessage(tabId, msg).catch((err) => {
+            sendToPanel(tabId, { type: 'error', message: err.message });
+        });
+    });
 
-        case 'INIT':
-          connectedTabId = msg.tabId;
-          connections.set(connectedTabId, port);
-          break;
-
-        // ── HTTP Intrude ─────────────────────────────────────────────────────
-        case 'ENABLE_INTERCEPT':
-          await enableIntercept(connectedTabId, msg.options);
-          port.postMessage({ type: 'INTERCEPT_ENABLED', options: msg.options });
-          break;
-
-        case 'DISABLE_INTERCEPT':
-          await disableIntercept(connectedTabId);
-          port.postMessage({ type: 'INTERCEPT_DISABLED' });
-          break;
-
-        case 'TOGGLE_JS': {
-          const st = debuggerState.get(connectedTabId);
-          if (!st) break;
-          const nextDisabled = !st.noJsEnabled;
-          await cdp(connectedTabId, 'Emulation.setScriptExecutionDisabled', { value: nextDisabled });
-          st.noJsEnabled = nextDisabled;
-          port.postMessage({ type: 'JS_TOGGLED', disabled: nextDisabled });
-          break;
-        }
-
-        case 'CONTINUE_REQUEST':
-          await continueRequest(connectedTabId, msg.requestId, msg.modifications);
-          port.postMessage({ type: 'REQUEST_CONTINUED', requestId: msg.requestId });
-          break;
-
-        case 'DROP_REQUEST':
-          await dropRequest(connectedTabId, msg.requestId);
-          port.postMessage({ type: 'REQUEST_DROPPED', requestId: msg.requestId });
-          break;
-
-        case 'FORWARD_ALL':
-          await forwardAll(connectedTabId);
-          port.postMessage({ type: 'ALL_FORWARDED' });
-          break;
-
-        // ── WS Monitor ───────────────────────────────────────────────────────
-        case 'WS_MONITOR_START':
-          await wsMonitorStart(connectedTabId);
-          port.postMessage({ type: 'WS_MONITOR_STARTED' });
-          break;
-
-        case 'WS_MONITOR_STOP':
-          await wsMonitorStop(connectedTabId);
-          port.postMessage({ type: 'WS_MONITOR_STOPPED' });
-          break;
-
-        // ── WS Intrude ───────────────────────────────────────────────────────
-        case 'WS_INTRUDE_ENABLE':
-          await wsIntrudeEnable(connectedTabId);
-          port.postMessage({ type: 'WS_INTRUDE_ENABLED' });
-          break;
-
-        case 'WS_INTRUDE_DISABLE':
-          await wsIntrudeDisable(connectedTabId);
-          port.postMessage({ type: 'WS_INTRUDE_DISABLED' });
-          break;
-
-        case 'WS_FORWARD':
-          await wsForward(connectedTabId, msg.msgId);
-          port.postMessage({ type: 'WS_FORWARDED', msgId: msg.msgId });
-          break;
-
-        case 'WS_DROP':
-          await wsDrop(connectedTabId, msg.msgId);
-          port.postMessage({ type: 'WS_DROPPED', msgId: msg.msgId });
-          break;
-
-        case 'WS_SEND_CUSTOM':
-          await wsInjectSend(connectedTabId, msg.socketUrl, msg.data);
-          port.postMessage({ type: 'WS_CUSTOM_SENT' });
-          break;
-      }
-    } catch (err) {
-      port.postMessage({ type: 'ERROR', message: err.message });
-      console.error('[DevTools Pro BG]', err);
-    }
-  });
-
-  port.onDisconnect.addListener(() => {
-    if (connectedTabId !== null) {
-      connections.delete(connectedTabId);
-      disableIntercept(connectedTabId).catch(() => {});
-      wsMonitorStop(connectedTabId).catch(() => {});
-    }
-  });
+    port.onDisconnect.addListener(() => {
+        panelPorts.delete(tabId);
+        teardownTab(tabId).catch(() => {
+            // Ignore teardown errors on disconnect.
+        });
+    });
 });
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// ─── DEBUGGER LIFECYCLE (SHARED) ──────────────────────────────────────────────
-// ═══════════════════════════════════════════════════════════════════════════════
+async function handlePanelMessage(tabId, msg) {
+    switch (msg.type) {
+        case 'intrude:attach':
+            await intrudeAttach(tabId, msg.mode);
+            return;
 
-async function ensureAttached(tabId) {
-  if (!debuggerState.has(tabId)) {
-    await chrome.debugger.attach({ tabId }, '1.3');
-    debuggerState.set(tabId, {
-      fetchEnabled:   false,
-      noJsEnabled:    false,
-      networkEnabled: false,
-      wsIntruding:    false,
-      wsScriptId:     null,
-    });
-  }
+        case 'intrude:detach':
+            await intrudeDetach(tabId);
+            return;
+
+        case 'intrude:forward':
+            await intrudeForward(tabId, msg.requestId, msg.modifications);
+            return;
+
+        case 'intrude:drop':
+            await intrudeDrop(tabId, msg.requestId);
+            return;
+
+        case 'js:enable':
+            await jsEnable(tabId);
+            return;
+
+        case 'js:disable':
+            await jsDisable(tabId);
+            return;
+
+        case 'ws:attach':
+            await wsAttach(tabId);
+            return;
+
+        case 'ws:detach':
+            await wsDetach(tabId);
+            return;
+
+        case 'ws:forward':
+            await wsForward(tabId, msg.messageId, msg.payload);
+            return;
+
+        case 'ws:drop':
+            await wsDrop(tabId, msg.messageId);
+            return;
+
+        case 'ws:create':
+            await wsCreateAndSend(tabId, msg.payload);
+            return;
+
+        default:
+            console.warn('[DevTools Pro] Unknown message type:', msg.type);
+            return;
+    }
 }
 
-async function detachIfIdle(tabId) {
-  const st = debuggerState.get(tabId);
-  if (!st) return;
-  if (st.fetchEnabled || st.networkEnabled || st.wsIntruding) return;
-  try { await chrome.debugger.detach({ tabId }); } catch (_) {}
-  debuggerState.delete(tabId);
+async function intrudeAttach(tabId, mode) {
+    try {
+        await ensureDebuggerAttached(tabId);
+
+        intrudeTabs.set(tabId, mode);
+
+        await cdp(tabId, 'Fetch.enable', {
+            patterns: [{ urlPattern: '*', requestStage: 'Request' }],
+            handleAuthRequests: false,
+        });
+
+        await cdp(tabId, 'Debugger.enable', {});
+
+        if (mode === 'no-js') {
+            await cdp(tabId, 'Runtime.disable', {});
+        } else {
+            await cdp(tabId, 'Runtime.enable', {});
+        }
+
+        sendToPanel(tabId, { type: 'intrude:attached', mode });
+    } catch (err) {
+        sendToPanel(tabId, { type: 'error', message: err.message });
+    }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// ─── HTTP INTRUDE ─────────────────────────────────────────────────────────────
-// ═══════════════════════════════════════════════════════════════════════════════
+async function intrudeDetach(tabId) {
+    intrudeTabs.delete(tabId);
 
-async function enableIntercept(tabId, options = {}) {
-  await ensureAttached(tabId);
-  const st = debuggerState.get(tabId);
-
-  if (!st.fetchEnabled) {
-    await cdp(tabId, 'Fetch.enable', {
-      patterns: [{ urlPattern: '*', requestStage: 'Request' }],
-    });
-    st.fetchEnabled = true;
-  }
-
-  if (options.disableJs && !st.noJsEnabled) {
-    await cdp(tabId, 'Emulation.setScriptExecutionDisabled', { value: true });
-    st.noJsEnabled = true;
-  }
-}
-
-async function disableIntercept(tabId) {
-  const st = debuggerState.get(tabId);
-  if (!st || !st.fetchEnabled) return;
-
-  await forwardAll(tabId);
-
-  if (st.noJsEnabled) {
-    await cdp(tabId, 'Emulation.setScriptExecutionDisabled', { value: false }).catch(() => {});
-    st.noJsEnabled = false;
-  }
-
-  await cdp(tabId, 'Fetch.disable', {}).catch(() => {});
-  st.fetchEnabled = false;
-  await detachIfIdle(tabId);
-}
-
-async function continueRequest(tabId, requestId, mods = {}) {
-  const cmd = { requestId };
-  if (mods.url     !== undefined) cmd.url    = mods.url;
-  if (mods.method  !== undefined) cmd.method = mods.method;
-  if (Array.isArray(mods.headers) && mods.headers.length) cmd.headers = mods.headers;
-  if (mods.postData) cmd.postData = btoa(unescape(encodeURIComponent(mods.postData)));
-  await cdp(tabId, 'Fetch.continueRequest', cmd);
-  interceptedRequests.delete(requestId);
-}
-
-async function dropRequest(tabId, requestId) {
-  await cdp(tabId, 'Fetch.failRequest', { requestId, errorReason: 'BlockedByClient' });
-  interceptedRequests.delete(requestId);
-}
-
-async function forwardAll(tabId) {
-  const ids = [];
-  interceptedRequests.forEach((data, rid) => {
-    if (data.tabId === tabId) ids.push(rid);
-  });
-  for (const rid of ids) {
-    await cdp(tabId, 'Fetch.continueRequest', { requestId: rid }).catch(() => {});
-    interceptedRequests.delete(rid);
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// ─── WS MONITOR ───────────────────────────────────────────────────────────────
-// ═══════════════════════════════════════════════════════════════════════════════
-
-async function wsMonitorStart(tabId) {
-  await ensureAttached(tabId);
-  const st = debuggerState.get(tabId);
-  if (st.networkEnabled) return;
-  await cdp(tabId, 'Network.enable', {});
-  st.networkEnabled = true;
-}
-
-async function wsMonitorStop(tabId) {
-  const st = debuggerState.get(tabId);
-  if (!st || !st.networkEnabled) return;
-  if (st.wsIntruding) await wsIntrudeDisable(tabId);
-  await cdp(tabId, 'Network.disable', {}).catch(() => {});
-  st.networkEnabled = false;
-  await detachIfIdle(tabId);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// ─── WS INTRUDE ───────────────────────────────────────────────────────────────
-// ═══════════════════════════════════════════════════════════════════════════════
-
-const WS_PATCH_SCRIPT = `
-(function() {
-  if (window.__dtp_ws_patched__) {
-    if(window.__dtpWsSetIntercept__) window.__dtpWsSetIntercept__(true);
-    return;
-  }
-  window.__dtp_ws_patched__   = true;
-  window.__dtp_ws_intercept__ = false;
-
-  const _orig    = WebSocket.prototype.send;
-  const _pending = new Map();
-  let   _nextId  = 0;
-
-  WebSocket.prototype.send = function(data) {
-    if (!window.__dtp_ws_intercept__) return _orig.call(this, data);
-    const id  = String(++_nextId);
-    _pending.set(id, { ws: this, data });
-
-    let payload, dataType;
-    if (typeof data === 'string') {
-      payload = data; dataType = 'text';
-    } else if (data instanceof ArrayBuffer) {
-      payload = '[ArrayBuffer ' + data.byteLength + 'B]'; dataType = 'binary';
-    } else if (ArrayBuffer.isView(data)) {
-      payload = '[TypedArray ' + data.byteLength + 'B]'; dataType = 'binary';
-    } else {
-      payload = String(data); dataType = 'text';
+    for (const [requestId, data] of pendingRequests.entries()) {
+        if (data.tabId === tabId) {
+            pendingRequests.delete(requestId);
+        }
     }
 
-    try { __dtpWsMsg__(JSON.stringify({ id, url: this.url, data: payload, dataType })); } catch(e) {}
-  };
+    try {
+        await cdp(tabId, 'Fetch.disable', {});
+    } catch (_) {
+        // Ignore if already disabled/not attached.
+    }
 
-  window.__dtpWsForward__ = function(id) {
-    const item = _pending.get(id);
-    if (item) { _orig.call(item.ws, item.data); _pending.delete(id); }
-  };
-  window.__dtpWsDrop__ = function(id) { _pending.delete(id); };
-  window.__dtpWsSetIntercept__ = function(on) {
-    window.__dtp_ws_intercept__ = on;
-    if (!on) { _pending.forEach(item => _orig.call(item.ws, item.data)); _pending.clear(); }
-  };
-})();
-`;
+    try {
+        await cdp(tabId, 'Debugger.disable', {});
+    } catch (_) {
+        // Ignore if already disabled/not attached.
+    }
 
-async function wsIntrudeEnable(tabId) {
-  await wsMonitorStart(tabId);
-  const st = debuggerState.get(tabId);
-  if (st.wsIntruding) return;
+    try {
+        await cdp(tabId, 'Runtime.enable', {});
+    } catch (_) {
+        // Ignore if already enabled/not attached.
+    }
 
-  await cdp(tabId, 'Runtime.addBinding', { name: WS_BINDING }).catch(() => {});
-
-  const res = await cdp(tabId, 'Page.addScriptToEvaluateOnNewDocument', {
-    source: WS_PATCH_SCRIPT,
-  }).catch(() => ({ identifier: null }));
-  st.wsScriptId = res?.identifier ?? null;
-
-  await cdp(tabId, 'Runtime.evaluate', {
-    expression: WS_PATCH_SCRIPT, silent: true,
-  }).catch(() => {});
-
-  await cdp(tabId, 'Runtime.evaluate', {
-    expression: 'if(window.__dtpWsSetIntercept__)window.__dtpWsSetIntercept__(true);',
-    silent: true,
-  }).catch(() => {});
-
-  st.wsIntruding = true;
+    await detachIfUnmanaged(tabId);
+    sendToPanel(tabId, { type: 'intrude:detached' });
 }
 
-async function wsIntrudeDisable(tabId) {
-  const st = debuggerState.get(tabId);
-  if (!st || !st.wsIntruding) return;
-
-  await cdp(tabId, 'Runtime.evaluate', {
-    expression: 'if(window.__dtpWsSetIntercept__)window.__dtpWsSetIntercept__(false);',
-    silent: true,
-  }).catch(() => {});
-
-  if (st.wsScriptId) {
-    await cdp(tabId, 'Page.removeScriptToEvaluateOnNewDocument', {
-      identifier: st.wsScriptId,
-    }).catch(() => {});
-    st.wsScriptId = null;
-  }
-
-  await cdp(tabId, 'Runtime.removeBinding', { name: WS_BINDING }).catch(() => {});
-  st.wsIntruding = false;
+async function jsEnable(tabId) {
+    try {
+        await cdp(tabId, 'Runtime.enable', {});
+        sendToPanel(tabId, { type: 'js:enabled' });
+    } catch (err) {
+        sendToPanel(tabId, { type: 'error', message: err.message });
+    }
 }
 
-async function wsForward(tabId, msgId) {
-  await cdp(tabId, 'Runtime.evaluate', {
-    expression: `if(window.__dtpWsForward__)window.__dtpWsForward__(${JSON.stringify(String(msgId))});`,
-    silent: true,
-  }).catch(() => {});
+async function jsDisable(tabId) {
+    try {
+        await cdp(tabId, 'Runtime.disable', {});
+        sendToPanel(tabId, { type: 'js:disabled' });
+    } catch (err) {
+        sendToPanel(tabId, { type: 'error', message: err.message });
+    }
 }
 
-async function wsDrop(tabId, msgId) {
-  await cdp(tabId, 'Runtime.evaluate', {
-    expression: `if(window.__dtpWsDrop__)window.__dtpWsDrop__(${JSON.stringify(String(msgId))});`,
-    silent: true,
-  }).catch(() => {});
-}
+async function intrudeForward(tabId, requestId, modifications) {
+    try {
+        const params = { requestId };
 
-async function wsInjectSend(tabId, socketUrl, data) {
-  const safeUrl  = JSON.stringify(socketUrl);
-  const safeData = JSON.stringify(data);
-  const expr = `
-    (function(){
-      const socks = window.__dtp_ws_sockets__ || [];
-      for(const ws of socks){
-        if(ws.url===${safeUrl}&&ws.readyState===1){
-          const orig=WebSocket.prototype.send.__dtp_orig__||WebSocket.prototype.send;
-          orig.call(ws,${safeData}); return true;
+        if (modifications) {
+            if (modifications.url) params.url = modifications.url;
+            if (modifications.method) params.method = modifications.method;
+
+            if (modifications.headers) {
+                params.headers = Object.entries(modifications.headers).map(([name, value]) => ({
+                    name,
+                    value,
+                }));
+            }
+
+            if (modifications.postData !== undefined) {
+                params.postData = base64EncodeUnicode(modifications.postData);
+            }
         }
-      }
-      return false;
-    })()`;
-  await cdp(tabId, 'Runtime.evaluate', { expression: expr, silent: true }).catch(() => {});
+
+        await cdp(tabId, 'Fetch.continueRequest', params);
+        pendingRequests.delete(requestId);
+        sendToPanel(tabId, { type: 'intrude:forwarded', requestId });
+    } catch (err) {
+        sendToPanel(tabId, { type: 'error', message: err.message });
+    }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// ─── CDP EVENT LISTENER ───────────────────────────────────────────────────────
-// ═══════════════════════════════════════════════════════════════════════════════
+async function intrudeDrop(tabId, requestId) {
+    try {
+        await cdp(tabId, 'Fetch.failRequest', {
+            requestId,
+            errorReason: 'BlockedByClient',
+        });
+
+        pendingRequests.delete(requestId);
+        sendToPanel(tabId, { type: 'intrude:dropped', requestId });
+    } catch (err) {
+        sendToPanel(tabId, { type: 'error', message: err.message });
+    }
+}
+
+async function wsAttach(tabId) {
+    try {
+        await ensureDebuggerAttached(tabId);
+
+        wsTabs.add(tabId);
+        ensureWsTabMap(tabId);
+
+        await cdp(tabId, 'Network.enable', {});
+        await cdp(tabId, 'Runtime.enable', {});
+        await installWsSenderHelper(tabId);
+
+        sendToPanel(tabId, { type: 'ws:attached' });
+    } catch (err) {
+        sendToPanel(tabId, { type: 'error', message: err.message });
+    }
+}
+
+async function wsDetach(tabId) {
+    wsTabs.delete(tabId);
+    wsConnectionsByTab.delete(tabId);
+
+    try {
+        await cdp(tabId, 'Network.disable', {});
+    } catch (_) {
+        // Ignore if domain is already disabled/not attached.
+    }
+
+    await detachIfUnmanaged(tabId);
+    sendToPanel(tabId, { type: 'ws:detached' });
+}
+
+async function wsForward(tabId, messageId, payload) {
+    // Frame interception is not synchronous in CDP Network events. When the user
+    // edits and forwards, send payload as a new frame through the active socket.
+    if (typeof payload === 'string' && payload.length > 0) {
+        await wsCreateAndSend(tabId, payload);
+    }
+
+    sendToPanel(tabId, { type: 'ws:forwarded', messageId });
+}
+
+async function wsDrop(tabId, messageId) {
+    // See note in wsForward.
+    sendToPanel(tabId, { type: 'ws:dropped', messageId });
+}
+
+async function wsCreateAndSend(tabId, payload) {
+    try {
+        const expression = `(() => {
+      if (typeof window.__devtoolsProWsSendCustom !== 'function') return false;
+      return window.__devtoolsProWsSendCustom(${JSON.stringify(payload || '')});
+    })()`;
+
+        const result = await cdp(tabId, 'Runtime.evaluate', {
+            expression,
+            returnByValue: true,
+            awaitPromise: true,
+        });
+
+        const ok = Boolean(result && result.result && result.result.value);
+        if (!ok) {
+            sendToPanel(tabId, {
+                type: 'error',
+                message: 'No open WebSocket instance found on the page.',
+            });
+            return;
+        }
+
+        sendToPanel(tabId, { type: 'ws:created' });
+    } catch (err) {
+        sendToPanel(tabId, { type: 'error', message: err.message });
+    }
+}
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
-  const tabId = source.tabId;
-  const port  = connections.get(tabId);
+    const tabId = source.tabId;
+    if (!tabId) return;
 
-  switch (method) {
+    if (method === 'Fetch.requestPaused' && intrudeTabs.has(tabId)) {
+        pendingRequests.set(params.requestId, { tabId, ...params });
 
-    // HTTP
-    case 'Fetch.requestPaused': {
-      interceptedRequests.set(params.requestId, { tabId });
-      let postData = '';
-      if (params.request.postData) {
-        try { postData = decodeURIComponent(escape(atob(params.request.postData))); }
-        catch { postData = params.request.postData; }
-      }
-      const headers = Object.entries(params.request.headers || {}).map(([name, value]) => ({ name, value }));
-      send(port, { type: 'REQUEST_PAUSED', requestId: params.requestId, url: params.request.url,
-        method: params.request.method, headers, postData, resourceType: params.resourceType, timestamp: Date.now() });
-      break;
+        sendToPanel(tabId, {
+            type: 'intrude:requestPaused',
+            requestId: params.requestId,
+            url: params.request.url,
+            method: params.request.method,
+            headers: params.request.headers,
+            postData: params.request.postData || null,
+            resourceType: params.resourceType,
+            frameId: params.frameId,
+            networkId: params.networkId,
+            timestamp: Date.now(),
+        });
+        return;
     }
 
-    // WS lifecycle
-    case 'Network.webSocketCreated':
-      send(port, { type: 'WS_CREATED', requestId: params.requestId, url: params.url, timestamp: Date.now() });
-      break;
-
-    case 'Network.webSocketClosed':
-      send(port, { type: 'WS_CLOSED', requestId: params.requestId, timestamp: Date.now() });
-      break;
-
-    case 'Network.webSocketHandshakeResponseReceived':
-      send(port, { type: 'WS_HANDSHAKE', requestId: params.requestId,
-        status: params.response?.status, headers: params.response?.headers, timestamp: Date.now() });
-      break;
-
-    // WS frames
-    case 'Network.webSocketFrameSent':
-      send(port, { type: 'WS_FRAME_SENT', requestId: params.requestId,
-        data: params.response.payloadData, opcode: params.response.opcode,
-        timestamp: params.timestamp ? params.timestamp * 1000 : Date.now() });
-      break;
-
-    case 'Network.webSocketFrameReceived':
-      send(port, { type: 'WS_FRAME_RECEIVED', requestId: params.requestId,
-        data: params.response.payloadData, opcode: params.response.opcode,
-        timestamp: params.timestamp ? params.timestamp * 1000 : Date.now() });
-      break;
-
-    case 'Network.webSocketFrameError':
-      send(port, { type: 'WS_FRAME_ERROR', requestId: params.requestId,
-        errorMessage: params.errorMessage, timestamp: Date.now() });
-      break;
-
-    // WS intercept binding
-    case 'Runtime.bindingCalled': {
-      if (params.name !== WS_BINDING) break;
-      let payload;
-      try { payload = JSON.parse(params.payload); } catch { break; }
-      send(port, { type: 'WS_INTERCEPTED', msgId: payload.id, socketUrl: payload.url,
-        data: payload.data, dataType: payload.dataType, timestamp: Date.now() });
-      break;
+    if (!wsTabs.has(tabId)) {
+        return;
     }
-  }
+
+    switch (method) {
+        case 'Network.webSocketCreated': {
+            const wsMap = ensureWsTabMap(tabId);
+            wsMap.set(params.requestId, params.url || '');
+
+            sendToPanel(tabId, {
+                type: 'ws:socketDetected',
+                requestId: params.requestId,
+                url: params.url || '',
+                timestamp: Date.now(),
+            });
+            return;
+        }
+
+        case 'Network.webSocketClosed': {
+            const wsMap = ensureWsTabMap(tabId);
+            wsMap.delete(params.requestId);
+            return;
+        }
+
+        case 'Network.webSocketFrameSent': {
+            relayWsFrame(tabId, params, 'sent');
+            return;
+        }
+
+        case 'Network.webSocketFrameReceived': {
+            relayWsFrame(tabId, params, 'recv');
+            return;
+        }
+
+        default:
+            return;
+    }
 });
 
 chrome.debugger.onDetach.addListener((source, reason) => {
-  const tabId = source.tabId;
-  debuggerState.delete(tabId);
-  interceptedRequests.forEach((data, rid) => { if (data.tabId === tabId) interceptedRequests.delete(rid); });
-  send(connections.get(tabId), { type: 'DEBUGGER_DETACHED', reason });
+    const tabId = source.tabId;
+    if (!tabId) return;
+
+    intrudeTabs.delete(tabId);
+    wsTabs.delete(tabId);
+    wsConnectionsByTab.delete(tabId);
+
+    for (const [requestId, data] of pendingRequests.entries()) {
+        if (data.tabId === tabId) {
+            pendingRequests.delete(requestId);
+        }
+    }
+
+    sendToPanel(tabId, { type: 'intrude:detached', reason });
+    sendToPanel(tabId, { type: 'ws:detached', reason });
 });
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// ─── HELPERS ──────────────────────────────────────────────────────────────────
-// ═══════════════════════════════════════════════════════════════════════════════
+function relayWsFrame(tabId, params, direction) {
+    const wsMap = ensureWsTabMap(tabId);
+    const requestId = params.requestId || '';
+    const frame = params.response || {};
+    const payload = frame.payloadData || '';
+    const url = wsMap.get(requestId) || '';
 
-function cdp(tabId, method, params) {
-  return new Promise((resolve, reject) => {
-    chrome.debugger.sendCommand({ tabId }, method, params, (result) => {
-      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-      else resolve(result);
+    sendToPanel(tabId, {
+        type: 'ws:messagePaused',
+        messageId: `ws_${direction}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        requestId,
+        url,
+        direction,
+        payload,
+        opcode: frame.opcode,
+        timestamp: Date.now(),
     });
-  });
 }
 
-function send(port, msg) {
-  if (!port) return;
-  try { port.postMessage(msg); } catch (_) {}
+async function teardownTab(tabId) {
+    intrudeTabs.delete(tabId);
+    wsTabs.delete(tabId);
+    wsConnectionsByTab.delete(tabId);
+
+    for (const [requestId, data] of pendingRequests.entries()) {
+        if (data.tabId === tabId) {
+            pendingRequests.delete(requestId);
+        }
+    }
+
+    try {
+        await chrome.debugger.detach({ tabId });
+    } catch (_) {
+        // Ignore if debugger is already detached.
+    }
+}
+
+async function detachIfUnmanaged(tabId) {
+    if (intrudeTabs.has(tabId) || wsTabs.has(tabId)) {
+        return;
+    }
+
+    try {
+        await chrome.debugger.detach({ tabId });
+    } catch (_) {
+        // Ignore if debugger is already detached.
+    }
+}
+
+async function ensureDebuggerAttached(tabId) {
+    try {
+        await chrome.debugger.attach({ tabId }, '1.3');
+    } catch (err) {
+        const message = err && err.message ? err.message : '';
+        if (!message.includes('already attached')) {
+            throw err;
+        }
+    }
+}
+
+function ensureWsTabMap(tabId) {
+    if (!wsConnectionsByTab.has(tabId)) {
+        wsConnectionsByTab.set(tabId, new Map());
+    }
+    return wsConnectionsByTab.get(tabId);
+}
+
+async function installWsSenderHelper(tabId) {
+    const helperSource = `
+    (() => {
+      if (window.__devtoolsProWsHelperInstalled) return;
+      window.__devtoolsProWsHelperInstalled = true;
+
+      const NativeWebSocket = window.WebSocket;
+      const trackedSockets = [];
+
+      function DevtoolsProWebSocket(...args) {
+        const ws = new NativeWebSocket(...args);
+        trackedSockets.push(ws);
+        return ws;
+      }
+
+      DevtoolsProWebSocket.prototype = NativeWebSocket.prototype;
+      Object.setPrototypeOf(DevtoolsProWebSocket, NativeWebSocket);
+
+      ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'].forEach((key) => {
+        if (Object.prototype.hasOwnProperty.call(NativeWebSocket, key)) {
+          DevtoolsProWebSocket[key] = NativeWebSocket[key];
+        }
+      });
+
+      window.WebSocket = DevtoolsProWebSocket;
+
+      window.__devtoolsProWsSendCustom = (payload) => {
+        for (let i = trackedSockets.length - 1; i >= 0; i -= 1) {
+          const ws = trackedSockets[i];
+          if (ws && ws.readyState === NativeWebSocket.OPEN) {
+            ws.send(payload);
+            return true;
+          }
+        }
+        return false;
+      };
+    })();
+  `;
+
+    await cdp(tabId, 'Page.addScriptToEvaluateOnNewDocument', {
+        source: helperSource,
+    });
+
+    await cdp(tabId, 'Runtime.evaluate', {
+        expression: helperSource,
+    });
+}
+
+function cdp(tabId, method, params) {
+    return new Promise((resolve, reject) => {
+        chrome.debugger.sendCommand({ tabId }, method, params, (result) => {
+            if (chrome.runtime.lastError) {
+                reject(new Error(chrome.runtime.lastError.message));
+            } else {
+                resolve(result);
+            }
+        });
+    });
+}
+
+function sendToPanel(tabId, msg) {
+    const port = panelPorts.get(tabId);
+    if (!port) return;
+
+    try {
+        port.postMessage(msg);
+    } catch (_) {
+        // Ignore disconnected port race.
+    }
+}
+
+function base64EncodeUnicode(input) {
+    const text = typeof input === 'string' ? input : '';
+    const encoded = unescape(encodeURIComponent(text));
+    return btoa(encoded);
 }

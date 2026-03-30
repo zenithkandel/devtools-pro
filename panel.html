@@ -1,307 +1,552 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>DevTools Pro</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="panel.css">
-</head>
-<body>
-<div id="app">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="panel.css" />
+    <title>DevTools Pro</title>
+  </head>
+  <body>
+    <div id="app">
+      <!-- ═══ TOP TOOLBAR ══════════════════════════════════════ -->
+      <div id="toolbar">
+        <span class="brand">Dev<span>Tools</span> Pro</span>
 
-  <!-- ═══════════════════ TOOLBAR ═══════════════════════════════════════════ -->
-  <header class="toolbar">
-    <div class="toolbar-left">
-      <div class="logo">
-        <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-          <path d="M9 1L16.5 5.25V12.75L9 17L1.5 12.75V5.25L9 1Z" stroke="var(--accent)" stroke-width="1.5" stroke-linejoin="round"/>
-          <path d="M9 5L12.5 7.25V11.75L9 14L5.5 11.75V7.25L9 5Z" fill="var(--accent)" fill-opacity="0.3" stroke="var(--accent)" stroke-width="1"/>
-          <circle cx="9" cy="9" r="1.5" fill="var(--accent)"/>
-        </svg>
-        <span>DevTools Pro</span>
-      </div>
-      <nav class="tab-bar">
-        <button class="tab-btn active" data-tab="network">Network</button>
-        <button class="tab-btn" data-tab="intrude">
-          Intrude
-          <span class="badge" id="intrude-badge" hidden>0</span>
+        <!-- Tab Switchers -->
+        <button class="tab-btn active" data-tab="network" id="tab-network">
+          <span class="dot"></span> Network
         </button>
-        <button class="tab-btn" data-tab="ws-intruder">
-          WS Intruder
-          <span class="badge ws-badge" id="ws-badge" hidden>0</span>
+        <button class="tab-btn" data-tab="intrude" id="tab-intrude">
+          <span class="dot"></span> Intrude
         </button>
-      </nav>
-    </div>
-    <div class="toolbar-right">
-      <button class="icon-btn record-btn active" id="btn-record" title="Stop recording">
-        <svg width="10" height="10" viewBox="0 0 10 10"><circle cx="5" cy="5" r="4.5" fill="currentColor"/></svg>
-      </button>
-      <div class="separator"></div>
-      <button class="icon-btn" id="btn-clear" title="Clear log">
-        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-          <path d="M2 2L12 12M2 12L12 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-        </svg>
-      </button>
-      <label class="toggle-label">
-        <input type="checkbox" id="chk-preserve">
-        <span>Preserve log</span>
-      </label>
-      <div class="separator" id="js-sep" style="display:none"></div>
-      <div class="status-chip js-disabled-chip" id="js-status" style="display:none">
-        <svg width="8" height="8" viewBox="0 0 8 8"><circle cx="4" cy="4" r="4" fill="var(--warn)"/></svg>
-        JS DISABLED
-      </div>
-    </div>
-  </header>
+        <button class="tab-btn" data-tab="websocket" id="tab-websocket">
+          <span class="dot"></span> Websocket Intruder
+        </button>
 
-  <!-- ═══════════════════ NETWORK TAB ═══════════════════════════════════════ -->
-  <section class="tab-content active" id="tab-network">
-    <div class="filter-bar">
-      <div class="search-wrap">
-        <svg class="search-icon" width="13" height="13" viewBox="0 0 13 13" fill="none">
-          <circle cx="5.5" cy="5.5" r="4.5" stroke="currentColor" stroke-width="1.4"/>
-          <path d="M9.5 9.5L12 12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
-        </svg>
-        <input type="search" id="filter-search" placeholder="Filter by URL…" autocomplete="off" spellcheck="false">
-      </div>
-      <div class="type-filters" id="type-filters">
-        <button class="type-btn active" data-type="All">All</button>
-        <button class="type-btn" data-type="Fetch/XHR">Fetch/XHR</button>
-        <button class="type-btn" data-type="JS">JS</button>
-        <button class="type-btn" data-type="CSS">CSS</button>
-        <button class="type-btn" data-type="Img">Img</button>
-        <button class="type-btn" data-type="Media">Media</button>
-        <button class="type-btn" data-type="Font">Font</button>
-        <button class="type-btn" data-type="Doc">Doc</button>
-        <button class="type-btn" data-type="WS">WS</button>
-        <button class="type-btn" data-type="Other">Other</button>
-      </div>
-    </div>
-    <div class="split-view" id="network-split">
-      <div class="request-list-wrap" id="request-list-wrap">
-        <table class="request-table" id="request-table">
-          <thead>
-            <tr>
-              <th class="col-name">Name</th>
-              <th class="col-method">Method</th>
-              <th class="col-status">Status</th>
-              <th class="col-type">Type</th>
-              <th class="col-size">Size</th>
-              <th class="col-time">Time</th>
-              <th class="col-waterfall">Waterfall</th>
-            </tr>
-          </thead>
-          <tbody id="request-tbody"></tbody>
-        </table>
-        <div class="empty-state" id="empty-state">
-          <div class="empty-dot"></div>
-          <span>Recording network activity…</span>
+        <div class="toolbar-sep"></div>
+
+        <!-- Network controls (shown only on network tab) -->
+        <div
+          id="net-controls"
+          style="display: flex; align-items: center; gap: 6px"
+        >
+          <button class="tool-btn" id="btn-record" title="Pause recording">
+            ⏸ Pause
+          </button>
+          <button class="tool-btn danger" id="btn-clear" title="Clear requests">
+            ✕ Clear
+          </button>
+          <select class="method-select" id="method-filter">
+            <option value="ALL">ALL</option>
+            <option value="GET">GET</option>
+            <option value="POST">POST</option>
+            <option value="PUT">PUT</option>
+            <option value="PATCH">PATCH</option>
+            <option value="DELETE">DELETE</option>
+            <option value="OPTIONS">OPTIONS</option>
+          </select>
+          <input
+            id="filter-input"
+            type="text"
+            placeholder="Filter URL…"
+            autocomplete="off"
+          />
         </div>
       </div>
-      <div class="split-handle" id="split-handle"></div>
-      <div class="detail-pane" id="detail-pane">
-        <div class="detail-header">
-          <div class="detail-tabs" id="detail-tabs">
-            <button class="detail-tab active" data-dtab="headers">Headers</button>
-            <button class="detail-tab" data-dtab="payload">Payload</button>
-            <button class="detail-tab" data-dtab="response">Response</button>
-            <button class="detail-tab" data-dtab="cookies">Cookies</button>
-            <button class="detail-tab" data-dtab="timing">Timing</button>
+
+      <!-- ═══ CONTENT AREA ════════════════════════════════════ -->
+      <div id="content">
+        <!-- ── NETWORK PANEL ── -->
+        <div class="tab-panel active" id="network-panel" data-panel="network">
+          <!-- Request List (left) -->
+          <div id="request-list-pane">
+            <div class="list-header net-grid">
+              <span>Method</span>
+              <span>Status</span>
+              <span>Type</span>
+              <span class="col-url">URL</span>
+              <span>Size</span>
+              <span>Time</span>
+            </div>
+            <div id="request-list-body">
+              <div class="empty-state" id="net-empty">
+                <span class="icon">📡</span>
+                <p>
+                  Listening for network requests…<br />Reload the page to
+                  capture traffic.
+                </p>
+              </div>
+            </div>
           </div>
-          <button class="close-btn" id="btn-close-detail" title="Close">×</button>
-        </div>
-        <div class="detail-content" id="detail-content"></div>
-      </div>
-    </div>
-    <footer class="status-bar">
-      <span id="stat-count">0 requests</span>
-      <span class="stat-sep">·</span>
-      <span id="stat-transferred">0 B transferred</span>
-      <span class="stat-sep">·</span>
-      <span id="stat-time">Finish: —</span>
-    </footer>
-  </section>
 
-  <!-- ═══════════════════ INTRUDE TAB ═══════════════════════════════════════ -->
-  <section class="tab-content" id="tab-intrude">
-    <div class="intrude-controls">
-      <div class="mode-group">
-        <span class="mode-label">Mode</span>
-        <button class="mode-btn active" id="mode-no-js">
-          <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1 1L9 9M1 9L9 1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-          No JS + Hold
-        </button>
-        <button class="mode-btn" id="mode-yes-js">
-          <svg width="10" height="10" viewBox="0 0 10 10"><polyline points="2,3 5,7 8,3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          Yes JS + Hold
-        </button>
-      </div>
-      <div class="intrude-actions">
-        <button class="intercept-toggle-btn" id="btn-intercept-toggle">
-          <span class="toggle-dot"></span>
-          <span id="intercept-label">Enable Intercept</span>
-        </button>
-        <button class="action-btn" id="btn-js-toggle" style="display:none">Re-enable JS</button>
-        <button class="action-btn danger-btn" id="btn-forward-all" disabled>Forward All</button>
-      </div>
-    </div>
-    <div class="intrude-main">
-      <div class="intrude-panel queue-panel">
-        <div class="panel-hdr">
-          <span>Intercepted</span>
-          <span class="queue-count" id="queue-count">0</span>
+          <!-- Resize Handle -->
+          <div class="resize-handle" id="net-resize"></div>
+
+          <!-- Request Detail (right) -->
+          <div id="request-detail-pane" class="hidden">
+            <div class="detail-tabs">
+              <button class="detail-tab active" data-dtab="headers">
+                Headers
+              </button>
+              <button class="detail-tab" data-dtab="payload">Payload</button>
+              <button class="detail-tab" data-dtab="response">Response</button>
+              <button class="detail-tab" data-dtab="timing">Timing</button>
+            </div>
+            <div class="detail-body" id="detail-content">
+              <!-- filled by JS -->
+            </div>
+          </div>
+
+          <!-- Status bar -->
+          <div id="net-statusbar">
+            <span id="sb-count">0 requests</span>
+            <span>·</span>
+            <span id="sb-size">0 B</span>
+            <span>·</span>
+            <span id="sb-time">0 ms</span>
+          </div>
         </div>
-        <div class="queue-list" id="queue-list">
-          <div class="queue-empty">No requests intercepted</div>
-        </div>
-      </div>
-      <div class="intrude-split-handle" id="intrude-split-handle"></div>
-      <div class="intrude-panel editor-panel">
-        <div class="panel-hdr">
-          <span>Request Editor</span>
-          <div class="editor-actions" id="editor-actions" style="display:none">
-            <button class="ed-btn forward-btn" id="btn-forward">
-              Forward
-              <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
-                <path d="M1 5.5H10M7 2L10 5.5L7 9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
+
+        <!-- ── INTRUDE PANEL ── -->
+        <div class="tab-panel" id="intrude-panel" data-panel="intrude">
+          <!-- Intrude Toolbar -->
+          <div id="intrude-toolbar">
+            <div class="intrude-status-dot" id="intrude-dot"></div>
+            <span id="intrude-status-label"
+              >Not attached — select a mode and attach.</span
+            >
+
+            <div class="mode-selector" id="mode-selector">
+              <button
+                class="mode-btn active"
+                data-mode="no-js"
+                title="Pause JS and intercept all requests"
+              >
+                No JS · No Fwd
+              </button>
+              <button
+                class="mode-btn"
+                data-mode="yes-js"
+                title="JS runs normally, intercept all requests"
+              >
+                Yes JS · No Fwd
+              </button>
+            </div>
+
+            <button
+              class="js-toggle hidden"
+              id="js-toggle-btn"
+              title="Toggle JS execution while attached"
+            >
+              JS: ON
             </button>
-            <button class="ed-btn drop-btn" id="btn-drop">Drop</button>
+
+            <button class="attach-btn" id="attach-btn">⚡ Attach</button>
+          </div>
+
+          <!-- Intrude Main Area -->
+          <div id="intrude-main">
+            <!-- Queue -->
+            <div id="intercept-queue-pane">
+              <div class="queue-header">
+                <span class="queue-title">Intercepted</span>
+                <span class="queue-count" id="queue-count">0</span>
+              </div>
+              <div id="intercept-queue-body">
+                <div class="queue-empty" id="queue-empty">
+                  <div>🔴</div>
+                  <span
+                    >Attach to start intercepting.<br />Captured requests appear
+                    here.</span
+                  >
+                </div>
+              </div>
+            </div>
+
+            <!-- Editor -->
+            <div id="request-editor-pane">
+              <div id="editor-no-request" class="editor-no-request">
+                <div class="icon">✏️</div>
+                <span
+                  >Select an intercepted request<br />from the queue to edit and
+                  forward.</span
+                >
+              </div>
+
+              <div
+                id="editor-content"
+                style="
+                  display: none;
+                  flex: 1;
+                  flex-direction: column;
+                  overflow: hidden;
+                "
+              >
+                <!-- Top bar -->
+                <div class="editor-topbar">
+                  <div class="editor-info">
+                    <span class="editor-method" id="ed-method">GET</span>
+                    <span class="editor-url" id="ed-url"
+                      >https://example.com</span
+                    >
+                  </div>
+                  <button class="fwd-btn" id="btn-forward">▶ Forward</button>
+                  <button class="drop-btn" id="btn-drop">✕ Drop</button>
+                </div>
+
+                <!-- Editable sections -->
+                <div class="editor-sections">
+                  <!-- URL -->
+                  <div class="editor-section" style="flex-shrink: 0">
+                    <div class="section-label">
+                      <span>URL</span>
+                    </div>
+                    <input
+                      type="text"
+                      class="url-field"
+                      id="ed-url-input"
+                      spellcheck="false"
+                    />
+                  </div>
+
+                  <!-- Method -->
+                  <div
+                    class="editor-section"
+                    style="
+                      flex-shrink: 0;
+                      display: flex;
+                      align-items: center;
+                      gap: 8px;
+                      padding: 5px 8px;
+                      background: var(--bg-0);
+                    "
+                  >
+                    <span
+                      style="
+                        font-size: 9px;
+                        font-weight: 700;
+                        color: var(--text-2);
+                        letter-spacing: 0.1em;
+                        text-transform: uppercase;
+                      "
+                      >Method</span
+                    >
+                    <select
+                      id="ed-method-select"
+                      style="
+                        background: var(--bg-2);
+                        border: 1px solid var(--border);
+                        color: var(--text-0);
+                        font-family: var(--font);
+                        font-size: 10px;
+                        padding: 2px 4px;
+                        border-radius: 2px;
+                        outline: none;
+                      "
+                    >
+                      <option>GET</option>
+                      <option>POST</option>
+                      <option>PUT</option>
+                      <option>PATCH</option>
+                      <option>DELETE</option>
+                      <option>OPTIONS</option>
+                      <option>HEAD</option>
+                    </select>
+                  </div>
+
+                  <!-- Request Headers -->
+                  <div class="editor-section" style="height: 180px">
+                    <div class="section-label">
+                      <span>Request Headers</span>
+                      <span class="section-badge">name: value per line</span>
+                    </div>
+                    <textarea
+                      class="editor-field"
+                      id="ed-headers"
+                      spellcheck="false"
+                      placeholder="Content-Type: application/json&#10;Authorization: Bearer token&#10;…"
+                    ></textarea>
+                  </div>
+
+                  <!-- Body -->
+                  <div class="editor-section grow">
+                    <div class="section-label">
+                      <span>Request Body</span>
+                      <span class="section-badge" id="ed-body-type">raw</span>
+                    </div>
+                    <textarea
+                      class="editor-field"
+                      id="ed-body"
+                      spellcheck="false"
+                      placeholder="Request body (POST/PUT/PATCH)…"
+                    ></textarea>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <!-- /intrude-main -->
+        </div>
+        <!-- /intrude-panel -->
+
+        <!-- ── WEBSOCKET INTRUDER PANEL ── -->
+        <div
+          class="tab-panel"
+          id="websocket-panel"
+          data-panel="websocket"
+          style="display: flex; flex-direction: column; height: 100%"
+        >
+          <!-- WS Toolbar -->
+          <div
+            id="ws-toolbar"
+            style="
+              padding: 8px 12px;
+              border-bottom: 1px solid var(--border);
+              display: flex;
+              align-items: center;
+              gap: 10px;
+              background: var(--bg-1);
+            "
+          >
+            <button class="attach-btn" id="ws-attach-btn">⚡ Attach WS</button>
+            <span
+              id="ws-status-label"
+              style="font-size: 11px; color: var(--text-2)"
+              >Not attached.</span
+            >
+            <button
+              class="tool-btn danger"
+              id="ws-clear-btn"
+              title="Clear messages"
+            >
+              ✕ Clear
+            </button>
+          </div>
+
+          <!-- WS Main Area -->
+          <div
+            id="ws-main"
+            style="
+              display: flex;
+              flex: 1;
+              overflow: hidden;
+              height: calc(100vh - 70px);
+            "
+          >
+            <!-- Queue/Messages List -->
+            <div
+              id="ws-message-list-pane"
+              style="
+                width: 350px;
+                border-right: 1px solid var(--border);
+                display: flex;
+                flex-direction: column;
+                background: var(--bg-0);
+              "
+            >
+              <div
+                class="list-header net-grid"
+                style="
+                  display: flex;
+                  padding: 4px 8px;
+                  font-size: 10px;
+                  font-weight: 700;
+                  color: var(--text-2);
+                  border-bottom: 1px solid var(--border);
+                  background: var(--bg-1);
+                "
+              >
+                <span style="flex: 1">Dir</span>
+                <span
+                  style="
+                    flex: 3;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                    overflow: hidden;
+                  "
+                  >Data</span
+                >
+                <span style="flex: 1; text-align: right">Time</span>
+              </div>
+              <div id="ws-message-list-body" style="flex: 1; overflow-y: auto">
+                <div class="empty-state" id="ws-empty">
+                  <span class="icon" style="font-size: 24px; margin-bottom: 8px"
+                    >🔌</span
+                  >
+                  <p>Waiting for WebSocket messages…</p>
+                </div>
+              </div>
+            </div>
+
+            <!-- Resize Handle -->
+            <div
+              class="resize-handle"
+              id="ws-resize"
+              style="width: 4px; cursor: col-resize; background: var(--border)"
+            ></div>
+
+            <!-- WS Message Editor / Creator -->
+            <div
+              id="ws-editor-pane"
+              style="
+                flex: 1;
+                display: flex;
+                flex-direction: column;
+                background: var(--bg-0);
+              "
+            >
+              <div class="detail-tabs">
+                <button class="detail-tab active" data-wstab="view">
+                  View/Edit Selected
+                </button>
+                <button class="detail-tab" data-wstab="create">
+                  Create New Message
+                </button>
+              </div>
+
+              <div
+                class="detail-body"
+                id="ws-editor-content"
+                style="
+                  padding: 10px;
+                  display: flex;
+                  flex-direction: column;
+                  flex: 1;
+                "
+              >
+                <!-- View/Edit active message -->
+                <div
+                  id="ws-view-tab"
+                  style="display: flex; flex-direction: column; height: 100%"
+                >
+                  <div
+                    id="ws-no-message"
+                    class="editor-no-request"
+                    style="
+                      padding: 20px;
+                      text-align: center;
+                      color: var(--text-2);
+                    "
+                  >
+                    <div
+                      class="icon"
+                      style="font-size: 24px; margin-bottom: 10px"
+                    >
+                      💬
+                    </div>
+                    <span>Select a message to view or edit.</span>
+                  </div>
+
+                  <div
+                    id="ws-message-details"
+                    style="display: none; flex-direction: column; height: 100%"
+                  >
+                    <div
+                      style="
+                        margin-bottom: 10px;
+                        display: flex;
+                        align-items: center;
+                        justify-content: space-between;
+                      "
+                    >
+                      <div>
+                        <span
+                          id="ws-detail-dir"
+                          style="
+                            padding: 2px 6px;
+                            border-radius: 3px;
+                            font-size: 10px;
+                            font-weight: bold;
+                            background: var(--bg-2);
+                          "
+                          >↑</span
+                        >
+                        <span
+                          id="ws-detail-time"
+                          style="
+                            font-size: 11px;
+                            color: var(--text-2);
+                            margin-left: 8px;
+                          "
+                        ></span>
+                      </div>
+                      <div style="display: flex; gap: 8px">
+                        <button class="fwd-btn" id="ws-btn-send-edited">
+                          ▶ Forward Edited
+                        </button>
+                        <button class="drop-btn" id="ws-btn-drop">
+                          ✕ Drop
+                        </button>
+                      </div>
+                    </div>
+
+                    <textarea
+                      id="ws-detail-payload"
+                      class="editor-field"
+                      style="
+                        flex: 1;
+                        width: 100%;
+                        resize: none;
+                        background: var(--bg-input);
+                        border: 1px solid var(--border);
+                        color: var(--text-0);
+                        font-family: var(--font-mono);
+                        padding: 8px;
+                        box-sizing: border-box;
+                      "
+                      spellcheck="false"
+                    ></textarea>
+                  </div>
+                </div>
+
+                <!-- Create new message -->
+                <div
+                  id="ws-create-tab"
+                  style="display: none; flex-direction: column; height: 100%"
+                >
+                  <div
+                    style="
+                      margin-bottom: 10px;
+                      display: flex;
+                      align-items: center;
+                      justify-content: space-between;
+                    "
+                  >
+                    <span style="font-size: 12px; font-weight: bold"
+                      >Send Custom Message</span
+                    >
+                    <button class="fwd-btn" id="ws-btn-send-new">▶ Send</button>
+                  </div>
+                  <textarea
+                    id="ws-new-payload"
+                    class="editor-field"
+                    style="
+                      flex: 1;
+                      width: 100%;
+                      resize: none;
+                      background: var(--bg-input);
+                      border: 1px solid var(--border);
+                      color: var(--text-0);
+                      font-family: var(--font-mono);
+                      padding: 8px;
+                      box-sizing: border-box;
+                    "
+                    spellcheck="false"
+                    placeholder="Enter message payload..."
+                  ></textarea>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
-        <div class="editor-body" id="editor-body">
-          <div class="editor-empty">Select a request from the queue to inspect and modify it</div>
-        </div>
+        <!-- /websocket-panel -->
       </div>
+      <!-- /content -->
     </div>
-  </section>
+    <!-- /app -->
 
-  <!-- ═══════════════════ WS INTRUDER TAB ═══════════════════════════════════ -->
-  <section class="tab-content" id="tab-ws-intruder">
+    <!-- Toast Container -->
+    <div id="toast-container"></div>
 
-    <!-- Controls bar -->
-    <div class="ws-controls">
-      <div class="ws-controls-left">
-        <!-- Monitor toggle -->
-        <button class="ws-toggle-btn" id="ws-monitor-btn">
-          <span class="ws-dot" id="ws-monitor-dot"></span>
-          <span id="ws-monitor-label">Start Monitor</span>
-        </button>
-
-        <div class="separator"></div>
-
-        <!-- Intercept toggle -->
-        <button class="ws-toggle-btn ws-intercept-btn" id="ws-intrude-btn" disabled>
-          <span class="ws-dot" id="ws-intrude-dot"></span>
-          <span id="ws-intrude-label">Intercept Off</span>
-        </button>
-
-        <div class="separator"></div>
-
-        <!-- Selected socket info -->
-        <span class="ws-selected-info" id="ws-selected-info">No socket selected</span>
-      </div>
-
-      <div class="ws-controls-right">
-        <button class="action-btn" id="ws-btn-clear-msgs" disabled>Clear Messages</button>
-        <button class="action-btn" id="ws-btn-clear-all" disabled>Clear All</button>
-
-        <!-- Custom send (visible when socket selected) -->
-        <div class="ws-custom-send" id="ws-custom-send-wrap" style="display:none">
-          <input type="text" id="ws-custom-input" class="ws-custom-input" placeholder="Send custom message…" spellcheck="false">
-          <button class="ed-btn forward-btn" id="ws-custom-send-btn">Send</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Three-panel layout: socket list | outgoing | incoming -->
-    <div class="ws-main">
-
-      <!-- Left: Socket list -->
-      <div class="ws-panel ws-socket-panel" id="ws-socket-panel">
-        <div class="panel-hdr">
-          <span>WebSockets</span>
-          <span class="ws-sock-count" id="ws-sock-count">0</span>
-        </div>
-        <div class="ws-socket-list" id="ws-socket-list">
-          <div class="ws-empty-socks">
-            <div class="ws-empty-icon">⚡</div>
-            <span>Start monitoring to<br>detect WebSocket connections.</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- Resize handle -->
-      <div class="ws-split-handle" id="ws-split-handle-1"></div>
-
-      <!-- Middle: Outgoing messages -->
-      <div class="ws-panel ws-msg-panel" id="ws-out-panel">
-        <div class="panel-hdr ws-dir-hdr ws-out-hdr">
-          <div class="ws-dir-label">
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-              <path d="M1 6H11M7 2L11 6L7 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-            <span>Outgoing</span>
-          </div>
-          <span class="ws-msg-count" id="ws-out-count">0</span>
-        </div>
-        <div class="ws-msg-list" id="ws-out-list">
-          <div class="ws-empty-msgs">Select a socket to see outgoing frames.</div>
-        </div>
-      </div>
-
-      <!-- Resize handle 2 -->
-      <div class="ws-split-handle" id="ws-split-handle-2"></div>
-
-      <!-- Right: Incoming messages -->
-      <div class="ws-panel ws-msg-panel" id="ws-in-panel">
-        <div class="panel-hdr ws-dir-hdr ws-in-hdr">
-          <div class="ws-dir-label">
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-              <path d="M11 6H1M5 2L1 6L5 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-            <span>Incoming</span>
-          </div>
-          <span class="ws-msg-count" id="ws-in-count">0</span>
-        </div>
-        <div class="ws-msg-list" id="ws-in-list">
-          <div class="ws-empty-msgs">Select a socket to see incoming frames.</div>
-        </div>
-      </div>
-
-    </div><!-- /ws-main -->
-
-    <!-- Intercept queue drawer (slides up when active) -->
-    <div class="ws-intercept-drawer" id="ws-intercept-drawer">
-      <div class="ws-drawer-header">
-        <div class="ws-drawer-title">
-          <span class="ws-dot ws-dot-active"></span>
-          Intercepted Outgoing
-          <span class="ws-intercept-count" id="ws-intercept-count">0</span>
-        </div>
-        <div class="ws-drawer-actions">
-          <button class="ed-btn forward-btn" id="ws-btn-fwd-selected" disabled>Forward</button>
-          <button class="ed-btn drop-btn"    id="ws-btn-drop-selected" disabled>Drop</button>
-          <button class="action-btn"         id="ws-btn-fwd-all"      disabled>Forward All</button>
-        </div>
-      </div>
-      <div class="ws-drawer-body">
-        <!-- Left: queue items -->
-        <div class="ws-intercept-queue" id="ws-intercept-queue">
-          <div class="queue-empty">Waiting for intercepted frames…</div>
-        </div>
-        <!-- Right: frame editor -->
-        <div class="ws-frame-editor" id="ws-frame-editor">
-          <div class="ws-editor-empty">Select an intercepted frame to edit it</div>
-        </div>
-      </div>
-    </div>
-
-  </section><!-- /ws-intruder -->
-
-</div><!-- /app -->
-<script src="panel.js"></script>
-</body>
+    <script src="panel.js"></script>
+  </body>
 </html>
