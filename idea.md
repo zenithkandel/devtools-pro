@@ -13,5 +13,3 @@ the extra features will be:
       2. yes js no forward mode:
          - all js execution will work as normal
          - all network requests will be funneled and the payload and the headers can be modified by the user and then forwarder
-
-1. s
