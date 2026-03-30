@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "DevTools Pro",
+  "version": "1.0.0",
+  "description": "Advanced DevTools with full network monitoring and Burp-style request interception.",
+  "permissions": [
+    "debugger",
+    "tabs",
+    "storage",
+    "scripting"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "devtools_page": "devtools.html",
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
